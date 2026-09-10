@@ -116,6 +116,8 @@ struct nvenc_data {
 	struct nvenc_properties props;
 
 	CUcontext cu_ctx;
+	uint8_t *upload_buffer;
+	size_t upload_buffer_size;
 };
 
 /* ------------------------------------------------------------------------- */

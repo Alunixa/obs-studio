@@ -39,6 +39,8 @@ target_sources(
     obs-ffmpeg-source.c
     obs-ffmpeg-video-encoders.c
     obs-ffmpeg.c
+    replay-disk-storage.c
+    replay-disk-storage.h
 )
 
 target_compile_options(obs-ffmpeg PRIVATE $<$<COMPILE_LANG_AND_ID:C,AppleClang,Clang>:-Wno-shorten-64-to-32>)

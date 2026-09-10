@@ -1,5 +1,6 @@
 #include "nvenc-internal.h"
 #include "nvenc-helpers.h"
+#include "nvenc-upload.h"
 
 /*
  * NVENC implementation using CUDA context and arrays
@@ -11,8 +12,9 @@
 bool cuda_ctx_init(struct nvenc_data *enc, obs_data_t *settings, const bool texture)
 {
 #ifdef _WIN32
-	if (texture)
+	if (texture) {
 		return true;
+	}
 #endif
 
 	int count;
@@ -25,8 +27,9 @@ bool cuda_ctx_init(struct nvenc_data *enc, obs_data_t *settings, const bool text
 	bool force_cuda_tex = obs_data_get_bool(settings, "force_cuda_tex");
 #endif
 
-	if (gpu == -1)
+	if (gpu == -1) {
 		gpu = 0;
+	}
 
 	CU_FAILED(cu->cuInit(0))
 	CU_FAILED(cu->cuDeviceGetCount(&count))
@@ -197,12 +200,19 @@ static void cuda_surface_free(struct nvenc_data *enc, struct nv_cuda_surface *nv
 
 void cuda_free_surfaces(struct nvenc_data *enc)
 {
-	if (!enc->cu_ctx)
+	if (!enc->cu_ctx) {
 		return;
+	}
 
 	cu->cuCtxPushCurrent(enc->cu_ctx);
 	for (size_t i = 0; i < enc->surfaces.num; i++) {
 		cuda_surface_free(enc, &enc->surfaces.array[i]);
+	}
+	if (enc->upload_buffer) {
+		cu->cuMemHostUnregister(enc->upload_buffer);
+		bfree(enc->upload_buffer);
+		enc->upload_buffer = NULL;
+		enc->upload_buffer_size = 0;
 	}
 	cu->cuCtxPopCurrent(NULL);
 }
@@ -213,78 +223,43 @@ void cuda_free_surfaces(struct nvenc_data *enc)
 static inline bool copy_frame(struct nvenc_data *enc, struct encoder_frame *frame, struct nv_cuda_surface *surf)
 {
 	bool success = true;
-	size_t height = enc->cy;
-	size_t width = enc->cx;
-	CUDA_MEMCPY2D m = {0};
-
-	m.srcMemoryType = CU_MEMORYTYPE_HOST;
-	m.dstMemoryType = CU_MEMORYTYPE_ARRAY;
-	m.dstArray = surf->tex;
-	m.WidthInBytes = width;
-	m.Height = height;
-
 	CU_FAILED(cu->cuCtxPushCurrent(enc->cu_ctx))
 
-	if (enc->surface_format == NV_ENC_BUFFER_FORMAT_NV12) {
-		/* Page-locks the host memory so that it can be DMAd directly
-		 * rather than CUDA doing an internal copy to page-locked
-		 * memory before actually DMA-ing to the GPU. */
-		CU_CHECK(cu->cuMemHostRegister(frame->data[0], frame->linesize[0] * height, 0))
-		CU_CHECK(cu->cuMemHostRegister(frame->data[1], frame->linesize[1] * height / 2, 0))
-
-		m.srcPitch = frame->linesize[0];
-		m.srcHost = frame->data[0];
-		CU_FAILED(cu->cuMemcpy2D(&m))
-
-		m.srcPitch = frame->linesize[1];
-		m.srcHost = frame->data[1];
-		m.dstY += height;
-		m.Height /= 2;
-		CU_FAILED(cu->cuMemcpy2D(&m))
-	} else if (enc->surface_format == NV_ENC_BUFFER_FORMAT_YUV420_10BIT) {
-		CU_CHECK(cu->cuMemHostRegister(frame->data[0], frame->linesize[0] * height, 0))
-		CU_CHECK(cu->cuMemHostRegister(frame->data[1], frame->linesize[1] * height / 2, 0))
-
-		// P010 lines are double the size (16 bit per pixel)
-		m.WidthInBytes *= 2;
-
-		m.srcPitch = frame->linesize[0];
-		m.srcHost = frame->data[0];
-		CU_FAILED(cu->cuMemcpy2D(&m))
-
-		m.srcPitch = frame->linesize[1];
-		m.srcHost = frame->data[1];
-		m.dstY += height;
-		m.Height /= 2;
-		CU_FAILED(cu->cuMemcpy2D(&m))
-	} else { // I444
-		CU_CHECK(cu->cuMemHostRegister(frame->data[0], frame->linesize[0] * height, 0))
-		CU_CHECK(cu->cuMemHostRegister(frame->data[1], frame->linesize[1] * height, 0))
-		CU_CHECK(cu->cuMemHostRegister(frame->data[2], frame->linesize[2] * height, 0))
-
-		m.srcPitch = frame->linesize[0];
-		m.srcHost = frame->data[0];
-		CU_FAILED(cu->cuMemcpy2D(&m))
-
-		m.srcPitch = frame->linesize[1];
-		m.srcHost = frame->data[1];
-		m.dstY += height;
-		CU_FAILED(cu->cuMemcpy2D(&m))
-
-		m.srcPitch = frame->linesize[2];
-		m.srcHost = frame->data[2];
-		m.dstY += height;
-		CU_FAILED(cu->cuMemcpy2D(&m))
+	/* Keep one owned, page-locked staging buffer per encoder instead of
+	 * registering/unregistering every plane of every frame. cuMemcpy2D is
+	 * synchronous, so the next frame may safely reuse this buffer. */
+	if (!enc->upload_buffer) {
+		size_t size = nvenc_upload_size(enc->cx, enc->cy, enc->in_format);
+		if (!size) {
+			success = false;
+			goto unmap;
+		}
+		uint8_t *buffer = bmalloc(size);
+		if (!cuda_error_check(enc, cu->cuMemHostRegister(buffer, size, 0), __FUNCTION__, "cuMemHostRegister")) {
+			bfree(buffer);
+			success = false;
+			goto unmap;
+		}
+		enc->upload_buffer = buffer;
+		enc->upload_buffer_size = size;
+	}
+	if (!nvenc_pack_frame(enc->upload_buffer, enc->upload_buffer_size, frame, enc->cx, enc->cy, enc->in_format)) {
+		error("Invalid frame layout for CUDA upload");
+		success = false;
+		goto unmap;
 	}
 
-unmap:
-	if (frame->data[0])
-		cu->cuMemHostUnregister(frame->data[0]);
-	if (frame->data[1])
-		cu->cuMemHostUnregister(frame->data[1]);
-	if (frame->data[2])
-		cu->cuMemHostUnregister(frame->data[2]);
+	CUDA_MEMCPY2D m = {0};
+	m.srcMemoryType = CU_MEMORYTYPE_HOST;
+	m.srcHost = enc->upload_buffer;
+	m.srcPitch = (size_t)enc->cx * (enc->in_format == VIDEO_FORMAT_P010 ? 2 : 1);
+	m.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+	m.dstArray = surf->tex;
+	m.WidthInBytes = m.srcPitch;
+	m.Height = enc->upload_buffer_size / m.srcPitch;
+	CU_CHECK(cu->cuMemcpy2D(&m))
 
+unmap:
 	CU_FAILED(cu->cuCtxPopCurrent(NULL))
 
 	return success;
@@ -304,8 +279,9 @@ bool cuda_encode(void *data, struct encoder_frame *frame, struct encoder_packet 
 	/* ------------------------------------ */
 	/* copy to CUDA surface                 */
 
-	if (!copy_frame(enc, frame, surf))
+	if (!copy_frame(enc, frame, surf)) {
 		return false;
+	}
 
 	/* ------------------------------------ */
 	/* map output tex so nvenc can use it   */
@@ -314,8 +290,9 @@ bool cuda_encode(void *data, struct encoder_frame *frame, struct encoder_packet 
 	map.registeredResource = surf->res;
 	map.mappedBufferFmt = enc->surface_format;
 
-	if (NV_FAILED(nv.nvEncMapInputResource(enc->session, &map)))
+	if (NV_FAILED(nv.nvEncMapInputResource(enc->session, &map))) {
 		return false;
+	}
 
 	surf->mapped_res = map.mappedResource;
 

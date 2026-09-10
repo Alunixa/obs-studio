@@ -5842,7 +5842,7 @@
                           <item row="3" column="0">
                            <widget class="QLabel" name="advRBStorageModeLabel">
                             <property name="text">
-                             <string>Storage Mode (RAM / Disk)</string>
+                             <string>Basic.Settings.Output.ReplayBuffer.StorageMode</string>
                             </property>
                            </widget>
                           </item>
@@ -5850,12 +5850,12 @@
                            <widget class="QComboBox" name="advRBStorageMode">
                             <item>
                              <property name="text">
-                              <string>RAM (Memory)</string>
+                              <string>Basic.Settings.Output.ReplayBuffer.StorageMemory</string>
                              </property>
                             </item>
                             <item>
                              <property name="text">
-                              <string>SSD/HDD (Disk)</string>
+                              <string>Basic.Settings.Output.ReplayBuffer.StorageDisk</string>
                              </property>
                             </item>
                            </widget>

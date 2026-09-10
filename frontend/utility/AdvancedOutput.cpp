@@ -918,7 +918,7 @@ bool AdvancedOutput::StartReplayBuffer()
 		obs_data_set_string(settings, "extension", ext.c_str());
 		obs_data_set_bool(settings, "allow_spaces", !noSpace);
 		obs_data_set_int(settings, "max_time_sec", rbTime);
-		obs_data_set_int(settings, "max_size_mb", usesBitrate ? 0 : rbSize);
+		obs_data_set_int(settings, "max_size_mb", usesBitrate && rbStorageMode != 1 ? 0 : rbSize);
 		obs_data_set_int(settings, "storage_mode", rbStorageMode);
 
 		obs_output_update(replayBuffer, settings);

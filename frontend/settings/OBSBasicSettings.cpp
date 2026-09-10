@@ -2645,8 +2645,9 @@ void OBSBasicSettings::LoadAdvancedSettings()
 
 	ui->advReplayBuf->setChecked(replayBuf);
 	ui->advRBSecMax->setValue(rbTime);
+	ui->advRBStorageMode->setCurrentIndex(rbStorageMode == 1 ? 1 : 0);
+	AdvReplayBufferChanged();
 	ui->advRBMegsMax->setValue(rbSize);
-	ui->advRBStorageMode->setCurrentIndex(rbStorageMode);
 
 	ui->reconnectEnable->setChecked(reconnect);
 	ui->reconnectRetryDelay->setValue(retryDelay);
@@ -5309,8 +5310,9 @@ void OBSBasicSettings::AdvReplayBufferChanged()
 
 	int seconds = ui->advRBSecMax->value();
 
+	bool diskStorage = ui->advRBStorageMode->currentIndex() == 1;
 	int64_t memMaxMB;
-	if (ui->advRBStorageMode->currentIndex() == 1) {
+	if (diskStorage) {
 		memMaxMB = 8388608; // 8TB limit for Disk
 	} else {
 		// Set maximum to 75% of installed memory for RAM
@@ -5330,7 +5332,14 @@ void OBSBasicSettings::AdvReplayBufferChanged()
 	}
 
 	ui->advRBEstimate->setObjectName("");
-	if (varRateControl) {
+	ui->advRBMegsMax->setMaximum(memMaxMB);
+	ui->advRBMegsMaxLabel->setText(QTStr(diskStorage ? "Basic.Settings.Output.ReplayBuffer.DiskMax"
+						      : "Basic.Settings.Output.ReplayBuffer.MegabytesMax"));
+	if (diskStorage) {
+		ui->advRBMegsMax->setVisible(true);
+		ui->advRBMegsMaxLabel->setVisible(true);
+		ui->advRBEstimate->setText(QTStr("Basic.Settings.Output.ReplayBuffer.DiskInfo"));
+	} else if (varRateControl) {
 		ui->advRBMegsMax->setVisible(false);
 		ui->advRBMegsMaxLabel->setVisible(false);
 

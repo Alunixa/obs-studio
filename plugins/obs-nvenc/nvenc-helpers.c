@@ -48,16 +48,18 @@ bool nv_failed2(obs_encoder_t *encoder, void *session, NVENCSTATUS err, const ch
 	struct dstr error_message = {0};
 	const char *nvenc_error = NULL;
 
-	if (err == NV_ENC_SUCCESS)
+	if (err == NV_ENC_SUCCESS) {
 		return false;
+	}
 
 	if (session) {
 		nvenc_error = nv.nvEncGetLastErrorString(session);
 		if (nvenc_error) {
 			// Some NVENC errors begin with :: which looks
 			// odd to users. Strip it off.
-			while (*nvenc_error == ':')
+			while (*nvenc_error == ':') {
 				nvenc_error++;
+			}
 		}
 	}
 
@@ -128,12 +130,14 @@ static uint32_t get_nvenc_ver(void)
 	static bool failed = false;
 	static uint32_t ver = 0;
 
-	if (!failed && ver)
+	if (!failed && ver) {
 		return ver;
+	}
 
 	if (!nv_max_ver) {
-		if (failed)
+		if (failed) {
 			return 0;
+		}
 
 		nv_max_ver = (NV_MAX_VER_FUNC)load_nv_func("NvEncodeAPIGetMaxSupportedVersion");
 		if (!nv_max_ver) {
@@ -193,8 +197,9 @@ static inline bool init_nvenc_internal(obs_encoder_t *encoder)
 	static bool initialized = false;
 	static bool success = false;
 
-	if (initialized)
+	if (initialized) {
 		return success;
+	}
 	initialized = true;
 
 	uint32_t ver = get_nvenc_ver();
@@ -266,8 +271,9 @@ static void read_codec_caps(config_t *config, enum codec_type codec, const char 
 	struct encoder_caps *caps = &encoder_capabilities[codec];
 
 	codec_supported[codec] = config_get_bool(config, section, "codec_supported");
-	if (!codec_supported[codec])
+	if (!codec_supported[codec]) {
 		return;
+	}
 
 	caps->bframes = (int)config_get_int(config, section, "bframes");
 	caps->bref_modes = (int)config_get_int(config, section, "bref");
@@ -308,16 +314,27 @@ static bool nvenc_check(void)
 		goto fail;
 	}
 
+#ifdef _WIN32
+	/* The helper's own watchdog cannot protect a hang in DLL loading or
+	 * process shutdown. Bound the parent's wait as well. */
+	os_process_pipe_set_read_timeout(pp, 10000);
+#endif
+
 	for (;;) {
 		char data[2048];
 		size_t len = os_process_pipe_read(pp, (uint8_t *)data, sizeof(data));
-		if (!len)
+		if (!len) {
 			break;
+		}
 
 		dstr_ncat(&caps_str, data, len);
 	}
 
-	os_process_pipe_destroy(pp);
+	int exit_code = os_process_pipe_destroy(pp);
+	if (exit_code != 0) {
+		blog(LOG_WARNING, "[NVENC] Test process exited with code %d (1460 means probe timeout)", exit_code);
+		goto fail;
+	}
 
 	if (dstr_is_empty(&caps_str)) {
 		blog(LOG_WARNING, "[NVENC] Seems the NVENC test subprocess crashed. "
@@ -346,7 +363,9 @@ static bool nvenc_check(void)
 	const char *cuda_ver = config_get_string(config, "general", "cuda_ver");
 	const char *driver_ver = config_get_string(config, "general", "driver_ver");
 	/* Parse out major/minor for some brokenness checks  */
-	sscanf(driver_ver, "%d.%d", &driver_version_major, &driver_version_minor);
+	if (driver_ver) {
+		sscanf(driver_ver, "%d.%d", &driver_version_major, &driver_version_minor);
+	}
 
 	blog(LOG_INFO,
 	     "[obs-nvenc] NVENC version: %d.%d (compiled) / %s (driver), "
@@ -355,8 +374,9 @@ static bool nvenc_check(void)
 	     codec_supported[CODEC_AV1] ? "true" : "false");
 
 fail:
-	if (config)
+	if (config) {
 		config_close(config);
+	}
 
 	bfree(test_exe);
 	dstr_free(&caps_str);

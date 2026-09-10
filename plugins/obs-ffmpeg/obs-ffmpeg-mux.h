@@ -8,10 +8,12 @@
 #include <util/pipe.h>
 #include <util/platform.h>
 #include <util/threading.h>
+#include "replay-disk-storage.h"
 
 struct rb_packet {
 	struct encoder_packet pkt;
 	int64_t disk_offset;
+	struct replay_disk_chunk *disk_chunk;
 };
 
 typedef DARRAY(struct rb_packet) mux_packets_t;
@@ -38,9 +40,7 @@ struct ffmpeg_muxer {
 
 	/* replay buffer */
 	int storage_mode;
-	FILE *disk_tmp_file;
-	struct dstr disk_tmp_path;
-	int64_t disk_write_pos;
+	struct replay_disk_store disk_store;
 
 	int64_t save_ts;
 	int keyframes;

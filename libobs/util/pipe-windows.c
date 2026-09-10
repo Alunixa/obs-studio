@@ -27,6 +27,7 @@ struct os_process_pipe {
 	HANDLE handle;
 	HANDLE handle_err;
 	HANDLE process;
+	ULONGLONG read_deadline;
 };
 
 static bool create_pipe(HANDLE *input, HANDLE *output)
@@ -102,6 +103,8 @@ os_process_pipe_t *os_process_pipe_create(const char *cmd_line, const char *type
 	}
 
 	if (!create_pipe(&err_input, &err_output)) {
+		CloseHandle(output);
+		CloseHandle(input);
 		return NULL;
 	}
 
@@ -122,7 +125,7 @@ os_process_pipe_t *os_process_pipe_create(const char *cmd_line, const char *type
 		goto error;
 	}
 
-	pp = bmalloc(sizeof(*pp));
+	pp = bzalloc(sizeof(*pp));
 
 	pp->handle = read_pipe ? input : output;
 	pp->read_pipe = read_pipe;
@@ -136,13 +139,16 @@ os_process_pipe_t *os_process_pipe_create(const char *cmd_line, const char *type
 error:
 	CloseHandle(output);
 	CloseHandle(input);
+	CloseHandle(err_input);
+	CloseHandle(err_output);
 	return NULL;
 }
 
 static inline void add_backslashes(struct dstr *str, size_t count)
 {
-	while (count--)
+	while (count--) {
 		dstr_cat_ch(str, '\\');
+	}
 }
 
 os_process_pipe_t *os_process_pipe_create2(const os_process_args_t *args, const char *type)
@@ -159,10 +165,12 @@ os_process_pipe_t *os_process_pipe_create2(const os_process_args_t *args, const 
 		const char *arg = *argv;
 		bool needs_quotes = strlen(arg) == 0 || strstr(arg, " ") != NULL || strstr(arg, "\t") != NULL;
 
-		if (cmd_line.len)
+		if (cmd_line.len) {
 			dstr_cat_ch(&cmd_line, ' ');
-		if (needs_quotes)
+		}
+		if (needs_quotes) {
 			dstr_cat_ch(&cmd_line, '"');
+		}
 
 		while (*arg) {
 			if (*arg == '\\') {
@@ -182,8 +190,9 @@ os_process_pipe_t *os_process_pipe_create2(const os_process_args_t *args, const 
 			arg++;
 		}
 
-		if (bs_count)
+		if (bs_count) {
 			add_backslashes(&cmd_line, bs_count);
+		}
 
 		if (needs_quotes) {
 			add_backslashes(&cmd_line, bs_count);
@@ -199,19 +208,38 @@ os_process_pipe_t *os_process_pipe_create2(const os_process_args_t *args, const 
 	return ret;
 }
 
+void os_process_pipe_set_read_timeout(os_process_pipe_t *pp, uint32_t timeout_ms)
+{
+	if (pp && pp->read_pipe) {
+		pp->read_deadline = timeout_ms ? GetTickCount64() + timeout_ms : 0;
+	}
+}
+
+static DWORD probe_wait_time(os_process_pipe_t *pp)
+{
+	ULONGLONG now = GetTickCount64();
+	return now < pp->read_deadline ? (DWORD)(pp->read_deadline - now) : 0;
+}
+
 int os_process_pipe_destroy(os_process_pipe_t *pp)
 {
 	int ret = 0;
 
 	if (pp) {
-		DWORD code;
+		DWORD code = 0;
 
 		CloseHandle(pp->handle);
 		CloseHandle(pp->handle_err);
 
-		WaitForSingleObject(pp->process, INFINITE);
-		if (GetExitCodeProcess(pp->process, &code))
-			ret = (int)code;
+		DWORD timeout = pp->read_deadline ? probe_wait_time(pp) : INFINITE;
+		if (WaitForSingleObject(pp->process, timeout) == WAIT_TIMEOUT) {
+			TerminateProcess(pp->process, ERROR_TIMEOUT);
+			WaitForSingleObject(pp->process, 1000);
+			ret = ERROR_TIMEOUT;
+		}
+		if (GetExitCodeProcess(pp->process, &code)) {
+			ret = ret ? ret : (int)code;
+		}
 
 		CloseHandle(pp->process);
 		bfree(pp);
@@ -230,6 +258,30 @@ size_t os_process_pipe_read(os_process_pipe_t *pp, uint8_t *data, size_t len)
 	}
 	if (!pp->read_pipe) {
 		return 0;
+	}
+
+	if (pp->read_deadline) {
+		for (;;) {
+			/* Read only already available bytes, so ReadFile itself
+			 * cannot wait indefinitely for a stalled driver probe. */
+			DWORD available = 0;
+			if (!probe_wait_time(pp)) {
+				TerminateProcess(pp->process, ERROR_TIMEOUT);
+				return 0;
+			}
+			if (!PeekNamedPipe(pp->handle, NULL, 0, NULL, &available, NULL)) {
+				return 0;
+			}
+			if (available) {
+				if (len > available) {
+					len = available;
+				}
+				break;
+			}
+			if (WaitForSingleObject(pp->process, 10) == WAIT_OBJECT_0) {
+				return 0;
+			}
+		}
 	}
 
 	success = !!ReadFile(pp->handle, data, (DWORD)len, &bytes_read, NULL);
@@ -252,8 +304,9 @@ size_t os_process_pipe_read_err(os_process_pipe_t *pp, uint8_t *data, size_t len
 	success = !!ReadFile(pp->handle_err, data, (DWORD)len, &bytes_read, NULL);
 	if (success && bytes_read) {
 		return bytes_read;
-	} else
+	} else {
 		bytes_read = GetLastError();
+	}
 
 	return 0;
 }
