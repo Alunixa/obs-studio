@@ -90,12 +90,14 @@ static void load_module(const char *root, const char *name)
 	dstr_free(&data);
 }
 
-static void stop_output(obs_output_t *output)
+static void wait_output_stopped(obs_output_t *output, uint32_t timeout_ms)
 {
-	obs_output_stop(output);
-	uint64_t deadline = os_gettime_ns() + 15000000000ULL;
+	uint64_t started = os_gettime_ns();
+	uint64_t deadline = started + (uint64_t)timeout_ms * 1000000;
 	while (obs_output_active(output) && os_gettime_ns() < deadline)
 		os_sleep_ms(10);
+	printf("STOP WAIT %s: %llu ms, active=%d\n", obs_output_get_name(output),
+	       (unsigned long long)((os_gettime_ns() - started) / 1000000), obs_output_active(output));
 	CHECK(!obs_output_active(output));
 }
 
@@ -242,9 +244,14 @@ static int test_main(int argc, char **argv)
 		dstr_free(&blocker);
 		puts("PASS continuous five-second window, 250ms save spacing, failed export and successful retry");
 	}
-	stop_output(replay);
+	/* Both outputs share an encoder. Request both stops at the same media
+	 * timestamp; do not create a second, growing backlog while waiting for
+	 * the first output. Keep a bounded, logged allowance for GPU saturation. */
+	obs_output_stop(replay);
+	obs_output_stop(recording);
+	wait_output_stopped(replay, window_test ? 15000 : 60000);
 	wait_count(&saved_count, window_test ? 3 : 2);
-	stop_output(recording);
+	wait_output_stopped(recording, window_test ? 15000 : 60000);
 	printf("PASS %s %s storage=%d: recording and %ld replay saves at %ux%u/60\n", encoder_id, argv[4], storage_mode,
 	       os_atomic_load_long(&saved_count), video.output_width, video.output_height);
 
