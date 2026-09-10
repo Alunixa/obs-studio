@@ -81,6 +81,7 @@ static void ffmpeg_mux_destroy(void *data)
 	}
 	da_free(stream->mux_packets);
 	deque_free(&stream->packets);
+	replay_disk_end_save(stream->disk_save, false);
 	replay_disk_close(&stream->disk_store);
 
 	os_process_pipe_destroy(stream->pipe);
@@ -649,14 +650,16 @@ bool write_packet(struct ffmpeg_muxer *stream, struct encoder_packet *packet)
 	ret = os_process_pipe_write(stream->pipe, (const uint8_t *)&info, sizeof(info));
 	if (ret != sizeof(info)) {
 		warn("os_process_pipe_write for info structure failed");
-		signal_failure(stream);
+		if (!stream->is_replay_buffer)
+			signal_failure(stream);
 		return false;
 	}
 
 	ret = os_process_pipe_write(stream->pipe, packet->data, packet->size);
 	if (ret != packet->size) {
 		warn("os_process_pipe_write for packet data failed");
-		signal_failure(stream);
+		if (!stream->is_replay_buffer)
+			signal_failure(stream);
 		return false;
 	}
 
@@ -986,6 +989,7 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	UNUSED_PARAMETER(settings);
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
+	stream->is_replay_buffer = true;
 
 	proc_handler_t *ph = obs_output_get_proc_handler(output);
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
@@ -994,6 +998,7 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
 	signal_handler_add(sh, "void saving(ptr output)");
+	signal_handler_add(sh, "void save_failed(string error)");
 
 	return stream;
 }
@@ -1040,7 +1045,8 @@ static bool replay_buffer_start(void *data)
 			obs_data_release(s);
 			return false;
 		}
-		info("Using immutable disk chunks for replay buffer storage");
+		info("Using one disk cache file with deferred reclamation: '%s'",
+		     replay_disk_path(&stream->disk_store));
 	}
 
 	obs_data_release(s);
@@ -1156,6 +1162,17 @@ static void insert_packet(mux_packets_t *packets, struct rb_packet *packet, int6
 	da_insert(*packets, idx, &rb_pkt);
 }
 
+static void replay_buffer_save_failed(struct ffmpeg_muxer *stream)
+{
+	const char *error =
+		obs_module_text(stream->storage_mode == 1 ? "ReplayBuffer.DiskSaveFailed" : "ReplayBuffer.SaveFailed");
+	obs_output_set_last_error(stream->output, error);
+	calldata_t cd = {0};
+	calldata_set_string(&cd, "error", error);
+	signal_handler_signal(obs_output_get_signal_handler(stream->output), "save_failed", &cd);
+	calldata_free(&cd);
+}
+
 static void *replay_buffer_mux_thread(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
@@ -1203,7 +1220,8 @@ static void *replay_buffer_mux_thread(void *data)
 			error = true;
 			goto error;
 		}
-		rb_packet_release(rb);
+		/* Keep the entire snapshot pinned until the muxer has successfully
+		 * closed the output, not just until an individual packet is sent. */
 	}
 
 error:
@@ -1218,6 +1236,12 @@ error:
 		rb_packet_release(&stream->mux_packets.array[i]);
 	}
 	da_free(stream->mux_packets);
+	replay_disk_end_save(stream->disk_save, !error);
+	stream->disk_save = NULL;
+	if (error) {
+		warn("Replay save failed; disk reclamation remains paused until a successful save or an explicit stop");
+		replay_buffer_save_failed(stream);
+	}
 	os_atomic_set_bool(&stream->muxing, false);
 
 	if (!error) {
@@ -1237,16 +1261,19 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	const size_t size = sizeof(struct rb_packet);
 	size_t num_packets = stream->packets.size / size;
 
-	/* Publish only flushed, closed files to the reader. Further packets go
-	 * into new chunks, so saving never stops or copies the live buffer. */
-	if (stream->storage_mode == 1 && !replay_disk_seal(&stream->disk_store)) {
-		warn("Failed to flush disk replay buffer; aborting save");
-		obs_output_set_last_error(stream->output, obs_module_text("ReplayBuffer.DiskError"));
-		deactivate_replay_buffer(stream, OBS_OUTPUT_ERROR);
-		return;
-	}
 	if (!num_packets) {
 		return;
+	}
+	/* Freeze physical reclamation, not the rolling replay window. Expired
+	 * extents stay untouched while new packets append to the same cache. */
+	if (stream->storage_mode == 1) {
+		stream->disk_save = replay_disk_begin_save(&stream->disk_store);
+		if (!stream->disk_save) {
+			warn("Failed to flush disk replay buffer; aborting save");
+			obs_output_set_last_error(stream->output, obs_module_text("ReplayBuffer.DiskError"));
+			deactivate_replay_buffer(stream, OBS_OUTPUT_ERROR);
+			return;
+		}
 	}
 
 	da_reserve(stream->mux_packets, num_packets);
@@ -1289,7 +1316,7 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	signal_handler_signal(sh, "saving", &cd);
 	calldata_free(&cd);
 
-	generate_filename(stream, &stream->path, true);
+	generate_filename(stream, &stream->path, false);
 
 	os_atomic_set_bool(&stream->muxing, true);
 	stream->mux_thread_joinable = pthread_create(&stream->mux_thread, NULL, replay_buffer_mux_thread, stream) == 0;
@@ -1299,6 +1326,9 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 			rb_packet_release(&stream->mux_packets.array[i]);
 		}
 		da_free(stream->mux_packets);
+		replay_disk_end_save(stream->disk_save, false);
+		stream->disk_save = NULL;
+		replay_buffer_save_failed(stream);
 		os_atomic_set_bool(&stream->muxing, false);
 	}
 }

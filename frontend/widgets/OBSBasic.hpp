@@ -1051,6 +1051,7 @@ public slots:
 	void ReplayBufferStart();
 	void ReplayBufferSave();
 	void ReplayBufferSaved();
+	void ReplayBufferSaveFailed(QString error);
 	void ReplayBufferStopping();
 	void ReplayBufferStop(int code);
 

@@ -191,6 +191,16 @@ void OBSBasic::ReplayBufferSaved()
 	AutoRemux(QT_UTF8(path.c_str()));
 }
 
+void OBSBasic::ReplayBufferSaveFailed(QString error)
+{
+	ShowStatusBarMessage(error);
+	if (isVisible()) {
+		OBSMessageBox::warning(this, QTStr("Output.RecordError.Title"), error);
+	} else {
+		SysTrayNotify(error, QSystemTrayIcon::Warning);
+	}
+}
+
 void OBSBasic::ReplayBufferStop(int code)
 {
 	if (!outputHandler || !outputHandler->replayBuffer) {

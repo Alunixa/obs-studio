@@ -41,6 +41,8 @@ struct ffmpeg_muxer {
 	/* replay buffer */
 	int storage_mode;
 	struct replay_disk_store disk_store;
+	struct replay_disk_file *disk_save;
+	bool is_replay_buffer;
 
 	int64_t save_ts;
 	int keyframes;

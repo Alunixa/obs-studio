@@ -31,9 +31,13 @@ static size_t chunk_count(const char *directory)
 {
 	struct dstr pattern = {0};
 	os_glob_t *files = NULL;
-	dstr_printf(&pattern, "%s/replay-buffer-*.tmp", directory);
+	dstr_printf(&pattern, "%s/OBS-Replay-Cache/*", directory);
 	os_glob(pattern.array, 0, &files);
-	size_t count = files ? files->gl_pathc : 0;
+	size_t count = 0;
+	for (size_t i = 0; files && i < files->gl_pathc; i++) {
+		dstr_printf(&pattern, "%s/cache.tmp", files->gl_pathv[i].path);
+		count += os_file_exists(pattern.array) ? 1 : 0;
+	}
 	os_globfree(files);
 	dstr_free(&pattern);
 	return count;
@@ -54,7 +58,8 @@ static void test_lifetime(const char *directory)
 	CHECK(!replay_disk_write(&store, NULL, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(!replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
-	CHECK(replay_disk_seal(&store));
+	struct replay_disk_file *save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
 	CHECK(!replay_disk_read(&reader, chunk, -1, result, sizeof(result)));
 	CHECK(!replay_disk_read(&reader, chunk, offset + 1, result, sizeof(result)));
 
@@ -70,6 +75,7 @@ static void test_lifetime(const char *directory)
 	CHECK(chunk_count(directory) == 2); /* Reader pins the old chunk, too. */
 	replay_disk_reader_close(&reader);
 	replay_disk_close(&store);
+	replay_disk_end_save(save, true);
 	CHECK(chunk_count(directory) == 0);
 	puts("PASS immutable snapshot survives stop/restart; reader pins file; cleanup");
 }
@@ -103,7 +109,8 @@ static void test_concurrent_save(const char *directory)
 		packets[i].value = (uint8_t)i;
 		CHECK(replay_disk_write(&store, data, sizeof(data), &packets[i].chunk, &packets[i].offset));
 	}
-	CHECK(replay_disk_seal(&store));
+	struct replay_disk_file *save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
 	pthread_t thread;
 	CHECK(pthread_create(&thread, NULL, slow_reader, packets) == 0);
 
@@ -116,8 +123,110 @@ static void test_concurrent_save(const char *directory)
 	}
 	replay_disk_close(&store);
 	CHECK(pthread_join(thread, NULL) == 0);
+	CHECK(chunk_count(directory) == 1);
+	replay_disk_end_save(save, true);
 	CHECK(chunk_count(directory) == 0);
-	puts("PASS slow save concurrent with 2048 overwrites/rotations and stop");
+	puts("PASS one cache file; slow save concurrent with 2048 appends and stop");
+}
+
+static uint8_t first_byte(const char *path)
+{
+	FILE *file = os_fopen(path, "rb");
+	CHECK(file != NULL);
+	int byte = fgetc(file);
+	CHECK(byte != EOF);
+	CHECK(fclose(file) == 0);
+	return (uint8_t)byte;
+}
+
+#ifdef _WIN32
+static uint64_t allocated_size(const char *path)
+{
+	wchar_t *wide = NULL;
+	CHECK(os_utf8_to_wcs_ptr(path, 0, &wide) != 0);
+	DWORD high = 0;
+	SetLastError(NO_ERROR);
+	DWORD low = GetCompressedFileSizeW(wide, &high);
+	CHECK(low != INVALID_FILE_SIZE || GetLastError() == NO_ERROR);
+	bfree(wide);
+	return ((uint64_t)high << 32) | low;
+}
+#endif
+
+static void test_deferred_reclamation(const char *directory)
+{
+	struct replay_disk_store store = {0};
+	struct replay_disk_reader reader = {0};
+	struct replay_disk_stats before, failed, after;
+	struct replay_disk_chunk *old = NULL, *retained = NULL, *extra = NULL;
+	int64_t old_offset, retained_offset, extra_offset;
+	uint8_t *data = bmalloc(65536);
+	uint8_t *result = bmalloc(65536);
+	CHECK(replay_disk_open(&store, directory));
+	store.chunk_limit = 65536;
+	memset(data, 0x41, 65536);
+	CHECK(replay_disk_write(&store, data, 65536, &old, &old_offset));
+	struct replay_disk_file *save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
+	memset(data, 0x42, 65536);
+	CHECK(replay_disk_write(&store, data, 65536, &retained, &retained_offset));
+	CHECK(replay_disk_seal(&store));
+	replay_disk_chunk_release(old);
+	replay_disk_get_stats(&store, &before);
+	CHECK(before.reclaim_paused && before.deferred_bytes == 65536 && before.reusable_bytes == 0);
+	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
+	CHECK(chunk_count(directory) == 1);
+
+	replay_disk_end_save(save, false);
+	replay_disk_get_stats(&store, &failed);
+	CHECK(failed.reclaim_paused && failed.deferred_bytes == before.deferred_bytes);
+	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
+	memset(data, 0x43, 65536);
+	CHECK(replay_disk_write(&store, data, 65536, &extra, &extra_offset));
+	CHECK(replay_disk_seal(&store));
+	replay_disk_chunk_release(extra);
+	replay_disk_get_stats(&store, &failed);
+	CHECK(failed.reserved_bytes == 3 * 65536 && failed.deferred_bytes == 2 * 65536);
+	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
+#ifdef _WIN32
+	uint64_t allocated_before = allocated_size(replay_disk_path(&store));
+#endif
+
+	save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
+	replay_disk_end_save(save, true);
+	replay_disk_get_stats(&store, &after);
+	CHECK(!after.reclaim_paused && after.deferred_bytes == 0 && after.reusable_bytes == 2 * 65536);
+	CHECK(replay_disk_read(&reader, retained, retained_offset, result, 65536));
+	for (size_t i = 0; i < 65536; i++) {
+		CHECK(result[i] == 0x42);
+	}
+#ifdef _WIN32
+	if (after.sparse) {
+		CHECK(first_byte(replay_disk_path(&store)) == 0);
+		uint64_t allocated_after = allocated_size(replay_disk_path(&store));
+		CHECK(allocated_after < allocated_before);
+		printf("PASS sparse allocation reclaimed: %llu -> %llu bytes\n", (unsigned long long)allocated_before,
+		       (unsigned long long)allocated_after);
+	}
+#endif
+	for (int i = 0; i < 128; i++) {
+		CHECK(replay_disk_write(&store, data, 65536, &extra, &extra_offset));
+		CHECK(replay_disk_seal(&store));
+		replay_disk_chunk_release(extra);
+	}
+	replay_disk_get_stats(&store, &after);
+	CHECK(after.reserved_bytes == failed.reserved_bytes);
+	CHECK(chunk_count(directory) == 1);
+	CHECK(replay_disk_read(&reader, retained, retained_offset, result, 65536));
+	CHECK(result[0] == 0x42 && result[65535] == 0x42);
+	replay_disk_chunk_release(retained);
+	replay_disk_reader_close(&reader);
+	replay_disk_close(&store);
+	bfree(result);
+	bfree(data);
+	CHECK(chunk_count(directory) == 0);
+	puts("PASS failed save defers reclamation; successful retry frees only expired extents; bounded reuse");
 }
 
 static void test_failures(const char *directory)
@@ -129,7 +238,6 @@ static void test_failures(const char *directory)
 	uint8_t data[32] = {1};
 	uint8_t result[32];
 	struct dstr pattern = {0};
-	os_glob_t *files = NULL;
 
 	dstr_printf(&pattern, "%s/nonexistent/child", directory);
 	CHECK(!replay_disk_open(&store, pattern.array));
@@ -137,33 +245,24 @@ static void test_failures(const char *directory)
 	store.chunk_limit = 1;
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_seal(&store)); /* Packet larger than a chunk is valid. */
-	dstr_printf(&pattern, "%s/replay-buffer-*.tmp", directory);
-	CHECK(os_glob(pattern.array, 0, &files) == 0);
-	CHECK(files && files->gl_pathc == 1);
-	FILE *file = os_fopen(files->gl_pathv[0].path, "wb");
+	FILE *file = os_fopen(replay_disk_path(&store), "wb");
 	CHECK(file != NULL);
 	CHECK(fclose(file) == 0); /* Simulate externally truncated/corrupt storage. */
 	CHECK(!replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
 	replay_disk_reader_close(&reader);
 	replay_disk_chunk_release(chunk);
 	replay_disk_close(&store);
-	os_globfree(files);
 	dstr_free(&pattern);
 	CHECK(chunk_count(directory) == 0);
 
 	/* A read-only stream deterministically injects a write failure. */
 	CHECK(replay_disk_open(&store, directory));
-	dstr_printf(&pattern, "%s/replay-buffer-*.tmp", directory);
-	files = NULL;
-	CHECK(os_glob(pattern.array, 0, &files) == 0);
-	CHECK(files && files->gl_pathc == 1);
 	CHECK(fclose(store.file) == 0);
-	store.file = os_fopen(files->gl_pathv[0].path, "rb");
+	store.file = os_fopen(replay_disk_path(&store), "rb");
 	CHECK(store.file != NULL);
 	CHECK(!replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(chunk == NULL);
 	replay_disk_close(&store);
-	os_globfree(files);
 	dstr_free(&pattern);
 	CHECK(chunk_count(directory) == 0);
 	puts("PASS invalid directory, oversized packet, short read and write failure");
@@ -284,12 +383,17 @@ int main(int argc, char **argv)
 	CHECK(os_mkdirs(directory.array) == 0);
 	test_lifetime(directory.array);
 	test_concurrent_save(directory.array);
+	test_deferred_reclamation(directory.array);
 	test_failures(directory.array);
 	test_instances(directory.array);
 	test_frame_layout();
 #ifdef _WIN32
 	test_pipe_timeout(argv[0]);
 #endif
+	struct dstr cache_root = {0};
+	dstr_printf(&cache_root, "%s/OBS-Replay-Cache", directory.array);
+	CHECK(os_rmdir(cache_root.array) == 0);
+	dstr_free(&cache_root);
 	CHECK(os_rmdir(directory.array) == 0);
 	dstr_free(&directory);
 	CHECK(bnum_allocs() == allocations);

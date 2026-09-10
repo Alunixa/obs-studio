@@ -18,6 +18,7 @@ extern struct obs_source_info test_sinewave;
 extern struct obs_source_info test_random;
 static volatile long saved_count;
 static volatile long saving_count;
+static volatile long failed_count;
 
 static void on_saved(void *data, calldata_t *cd)
 {
@@ -31,6 +32,34 @@ static void on_saving(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(data);
 	UNUSED_PARAMETER(cd);
 	os_atomic_inc_long(&saving_count);
+}
+
+static void on_failed(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	CHECK(strlen(calldata_string(cd, "error")) > 0);
+	os_atomic_inc_long(&failed_count);
+}
+
+static void check_single_cache(const char *directory)
+{
+	struct dstr path = {0};
+	dstr_printf(&path, "%s/OBS-Replay-Cache/*", directory);
+	os_glob_t *files = NULL;
+	CHECK(os_glob(path.array, 0, &files) == 0);
+	size_t count = 0;
+	for (size_t i = 0; files && i < files->gl_pathc; i++) {
+		dstr_printf(&path, "%s/cache.tmp", files->gl_pathv[i].path);
+		count += os_file_exists(path.array) ? 1 : 0;
+	}
+	CHECK(count == 1);
+	os_globfree(files);
+	dstr_printf(&path, "%s/replay-buffer-*.tmp", directory);
+	files = NULL;
+	os_glob(path.array, 0, &files);
+	CHECK(!files || files->gl_pathc == 0);
+	os_globfree(files);
+	dstr_free(&path);
 }
 
 static void wait_count(volatile long *value, long target)
@@ -72,7 +101,7 @@ static void save_replay(obs_output_t *output)
 
 int main(int argc, char **argv)
 {
-	CHECK(argc == 6);
+	CHECK(argc == 6 || argc == 7);
 	const char *root = argv[1];
 	const char *directory = argv[2];
 	const char *encoder_id = argv[3];
@@ -80,6 +109,7 @@ int main(int argc, char **argv)
 				   : strcmp(argv[4], "P010") == 0 ? VIDEO_FORMAT_P010
 								  : VIDEO_FORMAT_NV12;
 	int storage_mode = atoi(argv[5]);
+	bool window_test = argc == 7 && strcmp(argv[6], "window") == 0;
 	CHECK(os_mkdirs(directory) >= 0);
 	CHECK(obs_startup("en-US", NULL, NULL));
 	struct dstr path = {0};
@@ -140,10 +170,10 @@ int main(int argc, char **argv)
 
 	settings = obs_data_create();
 	obs_data_set_string(settings, "directory", directory);
-	obs_data_set_string(settings, "format", "Replay-%CCYY-%MM-%DD-%hh-%mm-%ss");
+	obs_data_set_string(settings, "format", window_test ? "Replay" : "Replay-%CCYY-%MM-%DD-%hh-%mm-%ss");
 	obs_data_set_string(settings, "extension", "mkv");
-	obs_data_set_int(settings, "max_size_mb", 1);
-	obs_data_set_int(settings, "max_time_sec", 2);
+	obs_data_set_int(settings, "max_size_mb", window_test ? 64 : 1);
+	obs_data_set_int(settings, "max_time_sec", window_test ? 5 : 2);
 	obs_data_set_int(settings, "storage_mode", storage_mode);
 	obs_output_t *replay = obs_output_create("replay_buffer", "Regression replay", settings, NULL);
 	obs_data_release(settings);
@@ -152,6 +182,7 @@ int main(int argc, char **argv)
 	obs_output_set_audio_encoder(replay, aencoder, 0);
 	signal_handler_connect(obs_output_get_signal_handler(replay), "saved", on_saved, NULL);
 	signal_handler_connect(obs_output_get_signal_handler(replay), "saving", on_saving, NULL);
+	signal_handler_connect(obs_output_get_signal_handler(replay), "save_failed", on_failed, NULL);
 
 	settings = obs_data_create();
 	dstr_printf(&path, "%s/Recording.mkv", directory);
@@ -163,17 +194,50 @@ int main(int argc, char **argv)
 	obs_output_set_audio_encoder(recording, aencoder, 0);
 	CHECK(obs_output_start(recording));
 	CHECK(obs_output_start(replay));
-	os_sleep_ms(5500);
+	os_sleep_ms(window_test ? 6500 : 5500);
+	if (storage_mode == 1)
+		check_single_cache(directory);
 	save_replay(replay);
 	wait_count(&saved_count, 1);
-	os_sleep_ms(2500);
+	os_sleep_ms(window_test ? 250 : 2500);
 	save_replay(replay);
 	wait_count(&saving_count, 2);
+	if (window_test) {
+		wait_count(&saved_count, 2);
+		CHECK(obs_output_active(replay));
+		/* A regular file cannot be used as a directory. Fail only the
+		 * export destination, not the already-open rolling cache. */
+		struct dstr blocker = {0};
+		dstr_printf(&blocker, "%s/output-path-blocker", directory);
+		FILE *file = os_fopen(blocker.array, "wb");
+		CHECK(file != NULL && fclose(file) == 0);
+		settings = obs_output_get_settings(replay);
+		obs_data_set_string(settings, "directory", blocker.array);
+		obs_output_update(replay, settings);
+		obs_data_release(settings);
+		save_replay(replay);
+		wait_count(&failed_count, 1);
+		CHECK(obs_output_active(replay));
+		CHECK(os_atomic_load_long(&saved_count) == 2);
+		if (storage_mode == 1)
+			check_single_cache(directory);
+		settings = obs_output_get_settings(replay);
+		obs_data_set_string(settings, "directory", directory);
+		obs_output_update(replay, settings);
+		obs_data_release(settings);
+		os_sleep_ms(250);
+		save_replay(replay);
+		wait_count(&saved_count, 3);
+		CHECK(obs_output_active(replay));
+		CHECK(os_unlink(blocker.array) == 0);
+		dstr_free(&blocker);
+		puts("PASS continuous five-second window, 250ms save spacing, failed export and successful retry");
+	}
 	stop_output(replay);
-	wait_count(&saved_count, 2);
+	wait_count(&saved_count, window_test ? 3 : 2);
 	stop_output(recording);
-	printf("PASS %s %s storage=%d: recording and 2 replay saves at 2560x1440/60\n", encoder_id, argv[4],
-	       storage_mode);
+	printf("PASS %s %s storage=%d: recording and %ld replay saves at 2560x1440/60\n", encoder_id, argv[4],
+	       storage_mode, os_atomic_load_long(&saved_count));
 
 	obs_output_release(replay);
 	obs_output_release(recording);

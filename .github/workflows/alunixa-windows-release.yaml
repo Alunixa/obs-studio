@@ -47,7 +47,7 @@ jobs:
           } else {
             $Ref = $env:GITHUB_SHA
             $Tag = "alunixa-20260910-$($Ref.Substring(0,9))"
-            $Version = '32.2.2-alunixa.20260910'
+            $Version = '32.2.2-alunixa.20260910.2'
             $Skip = $false
           }
           "ref=$Ref" >> $env:GITHUB_OUTPUT

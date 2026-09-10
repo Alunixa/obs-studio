@@ -244,6 +244,7 @@ SimpleOutput::SimpleOutput(OBSBasic *main_) : BasicOutputHandler(main_)
 			stopReplayBuffer.Connect(signal, "stop", OBSStopReplayBuffer, this);
 			replayBufferStopping.Connect(signal, "stopping", OBSReplayBufferStopping, this);
 			replayBufferSaved.Connect(signal, "saved", OBSReplayBufferSaved, this);
+			replayBufferSaveFailed.Connect(signal, "save_failed", OBSReplayBufferSaveFailed, this);
 		}
 
 		const char *mux = "ffmpeg_muxer";

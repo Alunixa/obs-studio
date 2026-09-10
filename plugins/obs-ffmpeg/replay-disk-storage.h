@@ -3,13 +3,15 @@
 #include <util/dstr.h>
 #include <stdio.h>
 
-/* Sealed chunks are immutable. Packets and readers keep them alive independently
- * of the recording session, including while a replay is being saved. */
+/* Chunks are immutable extents inside ONE backing file, not separate files.
+ * Packets/readers pin extents; a save token also pauses physical reclamation. */
 struct replay_disk_chunk;
+struct replay_disk_file;
 
 struct replay_disk_store {
 	struct dstr directory;
 	FILE *file;
+	struct replay_disk_file *backing;
 	struct replay_disk_chunk *chunk;
 	int64_t chunk_limit;
 };
@@ -20,9 +22,23 @@ struct replay_disk_reader {
 	int64_t position;
 };
 
+struct replay_disk_stats {
+	int64_t reserved_bytes;
+	int64_t reusable_bytes;
+	int64_t deferred_bytes;
+	bool reclaim_paused;
+	bool sparse;
+};
+
 bool replay_disk_open(struct replay_disk_store *store, const char *directory);
 bool replay_disk_seal(struct replay_disk_store *store);
 void replay_disk_close(struct replay_disk_store *store);
+/* The token survives stop/restart. Failure keeps reclamation paused until a
+ * later successful save, or until the session is explicitly closed. */
+struct replay_disk_file *replay_disk_begin_save(struct replay_disk_store *store);
+void replay_disk_end_save(struct replay_disk_file *token, bool success);
+const char *replay_disk_path(const struct replay_disk_store *store);
+void replay_disk_get_stats(const struct replay_disk_store *store, struct replay_disk_stats *stats);
 bool replay_disk_write(struct replay_disk_store *store, const void *data, size_t size, struct replay_disk_chunk **chunk,
 		       int64_t *offset);
 void replay_disk_chunk_ref(struct replay_disk_chunk *chunk);
