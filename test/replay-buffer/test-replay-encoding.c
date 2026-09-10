@@ -101,6 +101,8 @@ static void stop_output(obs_output_t *output)
 
 static void save_replay(obs_output_t *output)
 {
+	printf("SAVE REQUEST active=%d frames=%d\n", obs_output_active(output), obs_output_get_total_frames(output));
+	fflush(stdout);
 	calldata_t cd = {0};
 	CHECK(proc_handler_call(obs_output_get_proc_handler(output), "save", &cd));
 	calldata_free(&cd);
@@ -223,6 +225,10 @@ int main(int argc, char **argv)
 		obs_output_update(replay, settings);
 		obs_data_release(settings);
 		save_replay(replay);
+		os_sleep_ms(1000);
+		printf("AFTER FAILURE REQUEST active=%d frames=%d error=%s\n", obs_output_active(replay),
+		       obs_output_get_total_frames(replay), obs_output_get_last_error(replay));
+		fflush(stdout);
 		wait_count(&failed_count, 1);
 		CHECK(obs_output_active(replay));
 		CHECK(os_atomic_load_long(&saved_count) == 2);

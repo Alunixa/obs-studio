@@ -973,6 +973,7 @@ static void save_replay_proc(void *data, calldata_t *cd)
 		}
 
 		stream->save_ts = os_gettime_ns() / 1000LL;
+		blog(LOG_DEBUG, "[replay buffer] Save requested at %" PRId64, stream->save_ts);
 	}
 }
 
