@@ -83,8 +83,6 @@ int main(int argc, char **argv)
 	CHECK(os_mkdirs(directory) >= 0);
 	CHECK(obs_startup("en-US", NULL, NULL));
 	struct dstr path = {0};
-	dstr_printf(&path, "%s/data/libobs", root);
-	obs_add_data_path(path.array);
 	struct obs_audio_info audio = {.samples_per_sec = 48000, .speakers = SPEAKERS_STEREO};
 	CHECK(obs_reset_audio(&audio));
 	struct obs_video_info video = {
