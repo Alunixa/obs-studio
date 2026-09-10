@@ -5334,7 +5334,7 @@ void OBSBasicSettings::AdvReplayBufferChanged()
 	ui->advRBEstimate->setObjectName("");
 	ui->advRBMegsMax->setMaximum(memMaxMB);
 	ui->advRBMegsMaxLabel->setText(QTStr(diskStorage ? "Basic.Settings.Output.ReplayBuffer.DiskMax"
-						      : "Basic.Settings.Output.ReplayBuffer.MegabytesMax"));
+							 : "Basic.Settings.Output.ReplayBuffer.MegabytesMax"));
 	if (diskStorage) {
 		ui->advRBMegsMax->setVisible(true);
 		ui->advRBMegsMaxLabel->setVisible(true);

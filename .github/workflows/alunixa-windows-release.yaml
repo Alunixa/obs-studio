@@ -1,0 +1,158 @@
+name: Alunixa Windows Build and Release
+run-name: OBS disk replay stability ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - codex/obs-replay-stability-20260910
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alunixa-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Windows x64 (${{ matrix.variant }})
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fixed, archive]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - name: Select source and release
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          if ($env:VARIANT -eq 'archive') {
+            $Ref = 'ba28278e021f19680fa4f675de4d2cfedbb961b2'
+            $Tag = 'archive-disk-replay-20260910'
+            $Version = '32.2.0-alunixa.archive.20260910'
+            gh release view $Tag --repo $env:GITHUB_REPOSITORY *> $null
+            $Skip = $LASTEXITCODE -eq 0
+          } else {
+            $Ref = $env:GITHUB_SHA
+            $Tag = "alunixa-20260910-$($Ref.Substring(0,9))"
+            $Version = '32.2.2-alunixa.20260910'
+            $Skip = $false
+          }
+          "ref=$Ref" >> $env:GITHUB_OUTPUT
+          "tag=$Tag" >> $env:GITHUB_OUTPUT
+          "version=$Version" >> $env:GITHUB_OUTPUT
+          "skip=$($Skip.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        if: steps.source.outputs.skip != 'true'
+        with:
+          ref: ${{ steps.source.outputs.ref }}
+          path: source
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure and build matching runtime
+        if: steps.source.outputs.skip != 'true'
+        working-directory: source
+        env:
+          BUILD_VERSION: ${{ steps.source.outputs.version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Args = @('--preset', 'windows-ci-x64', "-DOBS_VERSION_OVERRIDE=$env:BUILD_VERSION")
+          if ($env:VARIANT -eq 'fixed') { $Args += '-DENABLE_REPLAY_TESTS=ON' }
+          cmake @Args
+          if ($LASTEXITCODE) { throw 'CMake configure failed' }
+          cmake --build build_x64 --config Release --parallel
+          if ($LASTEXITCODE) { throw 'CMake build failed' }
+          cmake --install build_x64 --config Release --prefix build_x64/install
+          if ($LASTEXITCODE) { throw 'Runtime install failed' }
+
+      - name: Run regression tests
+        if: steps.source.outputs.skip != 'true' && matrix.variant == 'fixed'
+        working-directory: source
+        run: |
+          & ./build_x64/rundir/Release/bin/64bit/test-replay-storage.exe $env:RUNNER_TEMP |
+            Tee-Object -FilePath regression-tests.txt
+          if ($LASTEXITCODE) { throw 'Replay regression tests failed' }
+
+      - name: Verify plugin dependencies and package
+        if: steps.source.outputs.skip != 'true'
+        working-directory: source
+        run: |
+          & ../tooling/test/replay-buffer/Verify-Runtime.ps1 -Root ./build_x64/install |
+            Tee-Object -FilePath runtime-validation.txt
+          Push-Location build_x64
+          cpack -C Release
+          $Code = $LASTEXITCODE
+          Pop-Location
+          if ($Code) { throw 'CPack failed' }
+          $Zip = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File)
+          if ($Zip.Count -ne 1) { throw 'Expected exactly one complete Windows ZIP' }
+          $Hash = Get-FileHash -LiteralPath $Zip[0].FullName -Algorithm SHA256
+          "$($Hash.Hash.ToLowerInvariant())  $($Zip[0].Name)" |
+            Set-Content -LiteralPath build_x64/SHA256SUMS.txt -Encoding utf8
+
+      - name: Publish built release with change details
+        if: steps.source.outputs.skip != 'true'
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          $Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $Title = "Alunixa OBS - 2026-09-10 - $env:VARIANT"
+          if ($env:VARIANT -eq 'archive') {
+            $Notes = @"
+          ## Original disk replay archive
+          Original source preserved before upstream synchronization and repairs.
+          Commit: $env:SOURCE_REF
+          Branch: codex/archive/disk-replay-before-sync-20260910
+          Includes the original RAM/SSD-HDD selector, disk ring buffer and capacity settings.
+          This archive deliberately does not include the stability fixes.
+          The full matching Windows runtime was rebuilt by GitHub Actions.
+          "@
+          } else {
+            $Notes = Get-Content -LiteralPath ../tooling/docs/alunixa-obs-stability-20260910.md -Raw
+          }
+          $Notes += "`n`n## Build evidence`n- Source: $env:SOURCE_REF`n- GitHub Actions: $Run`n"
+          $Notes += "- Critical DLL dependency loading: PASS`n"
+          if ($env:VARIANT -eq 'fixed') {
+            $Notes += "- Disk replay, NVENC frame layout and probe timeout regressions: PASS`n"
+          }
+          $Notes += "`n``````text`n$(Get-Content build_x64/SHA256SUMS.txt -Raw)```````n"
+          $Notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
+          $Assets = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File |
+            Select-Object -ExpandProperty FullName)
+          $Assets += @('build_x64/SHA256SUMS.txt', 'runtime-validation.txt')
+          if ($env:VARIANT -eq 'fixed') { $Assets += 'regression-tests.txt' }
+          gh release create $env:RELEASE_TAG @Assets --repo $env:GITHUB_REPOSITORY `
+            --target $env:SOURCE_REF --title $Title --notes-file release-notes.md --prerelease --latest=false
+          if ($LASTEXITCODE) { throw 'Release publication failed' }
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: diagnostics-${{ matrix.variant }}
+          path: |
+            source/build_x64/CMakeFiles/CMakeConfigureLog.yaml
+            source/regression-tests.txt
+            source/runtime-validation.txt
+          retention-days: 7

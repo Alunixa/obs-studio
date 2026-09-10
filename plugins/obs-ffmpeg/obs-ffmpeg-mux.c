@@ -1230,6 +1230,8 @@ error:
 	return NULL;
 }
 
+static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code);
+
 static void replay_buffer_save(struct ffmpeg_muxer *stream)
 {
 	const size_t size = sizeof(struct rb_packet);
@@ -1239,6 +1241,8 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	 * into new chunks, so saving never stops or copies the live buffer. */
 	if (stream->storage_mode == 1 && !replay_disk_seal(&stream->disk_store)) {
 		warn("Failed to flush disk replay buffer; aborting save");
+		obs_output_set_last_error(stream->output, obs_module_text("ReplayBuffer.DiskError"));
+		deactivate_replay_buffer(stream, OBS_OUTPUT_ERROR);
 		return;
 	}
 	if (!num_packets) {

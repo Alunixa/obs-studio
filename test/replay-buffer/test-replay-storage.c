@@ -232,9 +232,10 @@ static void test_frame_layout(void)
 #ifdef _WIN32
 static void test_pipe_timeout(const char *executable)
 {
-	for (int mode = 0; mode < 3; mode++) {
+	for (int mode = 0; mode < 4; mode++) {
 		os_process_args_t *args = os_process_args_create(executable);
-		os_process_args_add_arg(args, mode == 0 ? "--hang" : mode == 1 ? "--write-then-hang" : "--exit");
+		const char *modes[] = {"--hang", "--write-then-hang", "--exit", "--write-exit"};
+		os_process_args_add_arg(args, modes[mode]);
 		uint64_t started = os_gettime_ns();
 		os_process_pipe_t *pipe = os_process_pipe_create2(args, "r");
 		os_process_args_destroy(args);
@@ -247,8 +248,8 @@ static void test_pipe_timeout(const char *executable)
 			total += count;
 		}
 		int code = os_process_pipe_destroy(pipe);
-		CHECK(code == (mode == 2 ? 0 : ERROR_TIMEOUT));
-		CHECK(total == (mode == 1 ? 5 : 0));
+		CHECK(code == (mode >= 2 ? 0 : ERROR_TIMEOUT));
+		CHECK(total == (mode == 1 || mode == 3 ? 5 : 0));
 		CHECK(os_gettime_ns() - started < 3000000000ULL);
 	}
 	puts("PASS parent timeout for silent/partial-output probes and normal exit");
@@ -259,6 +260,10 @@ int main(int argc, char **argv)
 {
 #ifdef _WIN32
 	if (argc == 2 && strcmp(argv[1], "--exit") == 0) {
+		return 0;
+	}
+	if (argc == 2 && strcmp(argv[1], "--write-exit") == 0) {
+		fwrite("hello", 1, 5, stdout);
 		return 0;
 	}
 	if (argc == 2 && (strcmp(argv[1], "--hang") == 0 || strcmp(argv[1], "--write-then-hang") == 0)) {

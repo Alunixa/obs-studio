@@ -278,9 +278,11 @@ size_t os_process_pipe_read(os_process_pipe_t *pp, uint8_t *data, size_t len)
 				}
 				break;
 			}
-			if (WaitForSingleObject(pp->process, 10) == WAIT_OBJECT_0) {
+			/* Check the pipe again after exit: the process may have
+			 * flushed its final output while we were waiting. */
+			if (WaitForSingleObject(pp->process, 10) == WAIT_OBJECT_0 &&
+			    (!PeekNamedPipe(pp->handle, NULL, 0, NULL, &available, NULL) || !available))
 				return 0;
-			}
 		}
 	}
 
