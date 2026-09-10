@@ -11,6 +11,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
 #endif
 
 #define CHECK(condition)                                                                 \
@@ -140,10 +141,13 @@ static uint8_t first_byte(const char *path)
 }
 
 #ifdef _WIN32
-static uint64_t allocated_size(const char *path)
+static uint64_t allocated_size(const struct replay_disk_store *store)
 {
+	/* Account for physical allocation, not pending cached writes. */
+	CHECK(fflush(store->file) == 0);
+	CHECK(FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(store->file))));
 	wchar_t *wide = NULL;
-	CHECK(os_utf8_to_wcs_ptr(path, 0, &wide) != 0);
+	CHECK(os_utf8_to_wcs_ptr(replay_disk_path(store), 0, &wide) != 0);
 	DWORD high = 0;
 	SetLastError(NO_ERROR);
 	DWORD low = GetCompressedFileSizeW(wide, &high);
@@ -189,7 +193,7 @@ static void test_deferred_reclamation(const char *directory)
 	CHECK(failed.reserved_bytes == 3 * 65536 && failed.deferred_bytes == 2 * 65536);
 	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
 #ifdef _WIN32
-	uint64_t allocated_before = allocated_size(replay_disk_path(&store));
+	uint64_t allocated_before = allocated_size(&store);
 #endif
 
 	save = replay_disk_begin_save(&store);
@@ -204,8 +208,8 @@ static void test_deferred_reclamation(const char *directory)
 #ifdef _WIN32
 	if (after.sparse) {
 		CHECK(first_byte(replay_disk_path(&store)) == 0);
-		uint64_t allocated_after = allocated_size(replay_disk_path(&store));
-		CHECK(allocated_after < allocated_before);
+		uint64_t allocated_after = allocated_size(&store);
+		CHECK(allocated_after > 0 && allocated_after < allocated_before);
 		printf("PASS sparse allocation reclaimed: %llu -> %llu bytes\n", (unsigned long long)allocated_before,
 		       (unsigned long long)allocated_after);
 	}

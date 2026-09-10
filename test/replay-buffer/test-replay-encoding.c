@@ -32,6 +32,8 @@ static void on_saving(void *data, calldata_t *cd)
 	UNUSED_PARAMETER(data);
 	UNUSED_PARAMETER(cd);
 	os_atomic_inc_long(&saving_count);
+	printf("SAVE STARTED %ld\n", os_atomic_load_long(&saving_count));
+	fflush(stdout);
 }
 
 static void on_failed(void *data, calldata_t *cd)
@@ -67,6 +69,11 @@ static void wait_count(volatile long *value, long target)
 	uint64_t deadline = os_gettime_ns() + 15000000000ULL;
 	while (os_atomic_load_long(value) < target && os_gettime_ns() < deadline)
 		os_sleep_ms(10);
+	if (os_atomic_load_long(value) < target) {
+		fprintf(stderr, "TIMEOUT target=%ld saved=%ld saving=%ld failed=%ld\n", target,
+			os_atomic_load_long(&saved_count), os_atomic_load_long(&saving_count),
+			os_atomic_load_long(&failed_count));
+	}
 	CHECK(os_atomic_load_long(value) >= target);
 }
 
