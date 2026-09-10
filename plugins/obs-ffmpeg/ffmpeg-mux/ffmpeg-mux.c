@@ -811,7 +811,10 @@ error:
 	}
 	ffm->io.output_file = NULL;
 	// A producer waiting for buffer space must wake up after an I/O failure.
+	// Serialize with its event reset to avoid losing this final wakeup.
+	pthread_mutex_lock(&ffm->io.data_mutex);
 	os_event_signal(ffm->io.buffer_space_available_event);
+	pthread_mutex_unlock(&ffm->io.data_mutex);
 	return NULL;
 }
 
