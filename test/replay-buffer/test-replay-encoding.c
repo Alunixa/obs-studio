@@ -128,10 +128,10 @@ int main(int argc, char **argv)
 		.graphics_module = "libobs-d3d11",
 		.fps_num = 60,
 		.fps_den = 1,
-		.base_width = 2560,
-		.base_height = 1440,
-		.output_width = 2560,
-		.output_height = 1440,
+		.base_width = window_test ? 1280 : 2560,
+		.base_height = window_test ? 720 : 1440,
+		.output_width = window_test ? 1280 : 2560,
+		.output_height = window_test ? 720 : 1440,
 		.output_format = format,
 		.gpu_conversion = true,
 		.colorspace = VIDEO_CS_709,
@@ -151,7 +151,7 @@ int main(int argc, char **argv)
 	obs_scene_t *scene = obs_scene_create("Synthetic scene");
 	obs_sceneitem_t *item = obs_scene_add(scene, random);
 	CHECK(item != NULL);
-	struct vec2 scale = {.x = 128.0f, .y = 72.0f};
+	struct vec2 scale = {.x = (float)video.base_width / 20.0f, .y = (float)video.base_height / 20.0f};
 	obs_sceneitem_set_scale(item, &scale);
 	obs_set_output_source(0, obs_scene_get_source(scene));
 	obs_set_output_source(1, sine);
@@ -225,10 +225,6 @@ int main(int argc, char **argv)
 		obs_output_update(replay, settings);
 		obs_data_release(settings);
 		save_replay(replay);
-		os_sleep_ms(1000);
-		printf("AFTER FAILURE REQUEST active=%d frames=%d error=%s\n", obs_output_active(replay),
-		       obs_output_get_total_frames(replay), obs_output_get_last_error(replay));
-		fflush(stdout);
 		wait_count(&failed_count, 1);
 		CHECK(obs_output_active(replay));
 		CHECK(os_atomic_load_long(&saved_count) == 2);
@@ -249,8 +245,8 @@ int main(int argc, char **argv)
 	stop_output(replay);
 	wait_count(&saved_count, window_test ? 3 : 2);
 	stop_output(recording);
-	printf("PASS %s %s storage=%d: recording and %ld replay saves at 2560x1440/60\n", encoder_id, argv[4],
-	       storage_mode, os_atomic_load_long(&saved_count));
+	printf("PASS %s %s storage=%d: recording and %ld replay saves at %ux%u/60\n", encoder_id, argv[4], storage_mode,
+	       os_atomic_load_long(&saved_count), video.output_width, video.output_height);
 
 	obs_output_release(replay);
 	obs_output_release(recording);

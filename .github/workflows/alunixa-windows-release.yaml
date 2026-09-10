@@ -89,6 +89,9 @@ jobs:
           & ./build_x64/rundir/Release/bin/64bit/test-replay-storage.exe $env:RUNNER_TEMP |
             Tee-Object -FilePath regression-tests.txt
           if ($LASTEXITCODE) { throw 'Replay regression tests failed' }
+          & ./build_x64/rundir/Release/bin/64bit/test-replay-mux.exe $env:RUNNER_TEMP 2>&1 |
+            Tee-Object -FilePath regression-tests.txt -Append
+          if ($LASTEXITCODE) { throw 'Muxer failure regression tests failed' }
 
       - name: Verify plugin dependencies and package
         if: steps.source.outputs.skip != 'true'

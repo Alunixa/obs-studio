@@ -126,6 +126,7 @@ struct io_header {
 
 struct io_buffer {
 	bool active;
+	bool mutex_initialized;
 	bool shutdown_requested;
 	bool output_error;
 	os_event_t *buffer_space_available_event;
@@ -172,17 +173,20 @@ static void header_free(struct header *header)
 	free(header->data);
 }
 
-static void free_avformat(struct ffmpeg_mux *ffm)
+static bool free_avformat(struct ffmpeg_mux *ffm)
 {
+	bool success = true;
 	if (ffm->output) {
 		avcodec_free_context(&ffm->video_ctx);
 
-		if ((ffm->output->oformat->flags & AVFMT_NOFILE) == 0) {
+		if ((ffm->output->oformat->flags & AVFMT_NOFILE) == 0 && ffm->output->pb) {
+			success = ffm->output->pb->error >= 0;
 			if (!ffmpeg_mux_is_network(ffm)) {
 				av_free(ffm->output->pb->buffer);
 				avio_context_free(&ffm->output->pb);
 			} else {
-				avio_close(ffm->output->pb);
+				if (avio_closep(&ffm->output->pb) < 0)
+					success = false;
 			}
 		}
 
@@ -200,13 +204,12 @@ static void free_avformat(struct ffmpeg_mux *ffm)
 	ffm->video_stream = NULL;
 	ffm->audio_infos = NULL;
 	ffm->num_audio_streams = 0;
+	return success;
 }
 
-static void ffmpeg_mux_free(struct ffmpeg_mux *ffm)
+static bool ffmpeg_mux_free(struct ffmpeg_mux *ffm)
 {
-	if (ffm->initialized) {
-		av_write_trailer(ffm->output);
-	}
+	bool success = !ffm->initialized || av_write_trailer(ffm->output) >= 0;
 
 	// If we're writing to a file with the deque, shut it
 	// down gracefully
@@ -219,16 +222,19 @@ static void ffmpeg_mux_free(struct ffmpeg_mux *ffm)
 		pthread_mutex_unlock(&ffm->io.data_mutex);
 		pthread_join(ffm->io.io_thread, NULL);
 
-		// Cleanup everything else
-		os_event_destroy(ffm->io.new_data_available_event);
-		os_event_destroy(ffm->io.buffer_space_available_event);
-
-		pthread_mutex_destroy(&ffm->io.data_mutex);
-
-		deque_free(&ffm->io.data);
+	} else if (ffm->io.output_file && fclose(ffm->io.output_file) != 0) {
+		success = false;
 	}
-
-	free_avformat(ffm);
+	if (os_atomic_load_bool(&ffm->io.output_error))
+		success = false;
+	// Also release resources after partially failed initialization.
+	os_event_destroy(ffm->io.new_data_available_event);
+	os_event_destroy(ffm->io.buffer_space_available_event);
+	if (ffm->io.mutex_initialized)
+		pthread_mutex_destroy(&ffm->io.data_mutex);
+	deque_free(&ffm->io.data);
+	if (!free_avformat(ffm))
+		success = false;
 
 	header_free(&ffm->video_header);
 
@@ -249,6 +255,7 @@ static void ffmpeg_mux_free(struct ffmpeg_mux *ffm)
 	av_packet_free(&ffm->packet);
 
 	memset(ffm, 0, sizeof(*ffm));
+	return success;
 }
 
 static bool get_opt_str(int *p_argc, char ***p_argv, char **str, const char *opt)
@@ -764,7 +771,11 @@ static void *ffmpeg_mux_io_thread(void *data)
 
 			// Seek if we need to
 			if (want_seek) {
-				os_fseeki64(ffm->io.output_file, next_seek_position, SEEK_SET);
+				if (os_fseeki64(ffm->io.output_file, next_seek_position, SEEK_SET) != 0) {
+					os_atomic_set_bool(&ffm->io.output_error, true);
+					fprintf(stderr, "Error seeking output file: %s\n", strerror(errno));
+					goto error;
+				}
 
 				// Update the next virtual position, making sure to take
 				// into account the size of the chunk we're about to write.
@@ -794,7 +805,13 @@ error:
 	if (chunk)
 		free(chunk);
 
-	fclose(ffm->io.output_file);
+	if (fclose(ffm->io.output_file) != 0) {
+		os_atomic_set_bool(&ffm->io.output_error, true);
+		fprintf(stderr, "Error flushing/closing output file: %s\n", strerror(errno));
+	}
+	ffm->io.output_file = NULL;
+	// A producer waiting for buffer space must wake up after an I/O failure.
+	os_event_signal(ffm->io.buffer_space_available_event);
 	return NULL;
 }
 
@@ -831,6 +848,10 @@ static int ffmpeg_mux_write_av_buffer(void *opaque, uint8_t *buf, int buf_size)
 
 	for (;;) {
 		pthread_mutex_lock(&ffm->io.data_mutex);
+		if (os_atomic_load_bool(&ffm->io.output_error)) {
+			pthread_mutex_unlock(&ffm->io.data_mutex);
+			return AVERROR(EIO);
+		}
 
 		// Avoid unbounded growth of the deque, cap to 256 MB
 		if (ffm->io.data.capacity >= 256 * 1048576 &&
@@ -889,18 +910,24 @@ static inline int open_output_file(struct ffmpeg_mux *ffm)
 			// ffmpeg_mux_write_av_buffer)
 			deque_reserve(&ffm->io.data, 1048576);
 
-			pthread_mutex_init(&ffm->io.data_mutex, NULL);
-
-			os_event_init(&ffm->io.buffer_space_available_event, OS_EVENT_TYPE_AUTO);
-			os_event_init(&ffm->io.new_data_available_event, OS_EVENT_TYPE_AUTO);
-
-			pthread_create(&ffm->io.io_thread, NULL, ffmpeg_mux_io_thread, ffm);
+			if (pthread_mutex_init(&ffm->io.data_mutex, NULL) != 0)
+				return FFM_ERROR;
+			ffm->io.mutex_initialized = true;
+			if (os_event_init(&ffm->io.buffer_space_available_event, OS_EVENT_TYPE_AUTO) != 0 ||
+			    os_event_init(&ffm->io.new_data_available_event, OS_EVENT_TYPE_AUTO) != 0)
+				return FFM_ERROR;
 
 			unsigned char *avio_ctx_buffer = av_malloc(AVIO_BUFFER_SIZE);
-
+			if (!avio_ctx_buffer)
+				return FFM_ERROR;
 			ffm->output->pb = avio_alloc_context(avio_ctx_buffer, AVIO_BUFFER_SIZE, 1, ffm, NULL,
 							     ffmpeg_mux_write_av_buffer, ffmpeg_mux_seek_av_buffer);
-
+			if (!ffm->output->pb) {
+				av_free(avio_ctx_buffer);
+				return FFM_ERROR;
+			}
+			if (pthread_create(&ffm->io.io_thread, NULL, ffmpeg_mux_io_thread, ffm) != 0)
+				return FFM_ERROR;
 			ffm->io.active = true;
 		} else {
 			ret = avio_open(&ffm->output->pb, ffm->params.file, AVIO_FLAG_WRITE);
@@ -980,13 +1007,11 @@ static int ffmpeg_mux_init_context(struct ffmpeg_mux *ffm)
 	}
 
 	if (!init_streams(ffm)) {
-		free_avformat(ffm);
 		return FFM_ERROR;
 	}
 
 	ret = open_output_file(ffm);
 	if (ret != FFM_SUCCESS) {
-		free_avformat(ffm);
 		return ret;
 	}
 
@@ -1120,15 +1145,17 @@ static inline bool read_change_file(struct ffmpeg_mux *ffm, uint32_t size, struc
 	char *argv1_backup = argv[1];
 	argv[1] = (char *)filename->buf;
 
-	ffmpeg_mux_free(ffm);
+	if (!ffmpeg_mux_free(ffm)) {
+		argv[1] = argv1_backup;
+		return false;
+	}
 
 	ret = ffmpeg_mux_init(ffm, argc, argv);
+	argv[1] = argv1_backup;
 	if (ret != FFM_SUCCESS) {
 		fprintf(stderr, "Couldn't initialize muxer\n");
 		return false;
 	}
-
-	argv[1] = argv1_backup;
 
 	return true;
 }
@@ -1177,7 +1204,8 @@ int main(int argc, char *argv[])
 		return ret;
 	}
 
-	while (!fail && safe_read(&info, sizeof(info)) == sizeof(info)) {
+	size_t header_size = 0;
+	while (!fail && (header_size = safe_read(&info, sizeof(info))) == sizeof(info)) {
 		if (info.type == FFM_PACKET_CHANGE_FILE) {
 			fail = !read_change_file(&ffm, info.size, &rb_filename, argc, argv);
 			continue;
@@ -1192,7 +1220,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	ffmpeg_mux_free(&ffm);
+	if (header_size != 0 && header_size != sizeof(info))
+		fail = true;
+	if (!ffmpeg_mux_free(&ffm))
+		fail = true;
 	resize_buf_free(&rb);
 	resize_buf_free(&rb_filename);
 
@@ -1201,5 +1232,5 @@ int main(int argc, char *argv[])
 		free(argv[i]);
 	free(argv);
 #endif
-	return 0;
+	return fail ? FFM_ERROR : FFM_SUCCESS;
 }
