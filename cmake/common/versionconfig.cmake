@@ -8,7 +8,7 @@ set(_obs_version_canonical ${_obs_default_version})
 # Attempt to automatically discover expected OBS version
 if(NOT DEFINED OBS_VERSION_OVERRIDE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   execute_process(
-    COMMAND git describe --always --tags --dirty=-modified
+    COMMAND git describe --always --tags --match "[0-9]*.[0-9]*.[0-9]*" --dirty=-modified
     OUTPUT_VARIABLE _obs_version
     ERROR_VARIABLE _git_describe_err
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -20,18 +20,12 @@ if(NOT DEFINED OBS_VERSION_OVERRIDE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git
     message(FATAL_ERROR "Could not fetch OBS version tag from git.\n" ${_git_describe_err})
   endif()
 
-  if(_obs_version_result EQUAL 0)
-    string(REGEX REPLACE "([0-9]+)\\.([0-9]+)\\.([0-9]+).*" "\\1;\\2;\\3" _obs_version_canonical ${_obs_version})
+  if(_obs_version_result EQUAL 0 AND _obs_version MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(_obs_version_canonical "${CMAKE_MATCH_1};${CMAKE_MATCH_2};${CMAKE_MATCH_3}")
   endif()
 elseif(DEFINED OBS_VERSION_OVERRIDE)
-  if(OBS_VERSION_OVERRIDE MATCHES "([0-9]+)\\.([0-9]+)\\.([0-9]+).*")
-    string(
-      REGEX REPLACE
-      "([0-9]+)\\.([0-9]+)\\.([0-9]+).*"
-      "\\1;\\2;\\3"
-      _obs_version_canonical
-      ${OBS_VERSION_OVERRIDE}
-    )
+  if(OBS_VERSION_OVERRIDE MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(_obs_version_canonical "${CMAKE_MATCH_1};${CMAKE_MATCH_2};${CMAKE_MATCH_3}")
     set(_obs_version ${OBS_VERSION_OVERRIDE})
   else()
     message(FATAL_ERROR "Invalid version supplied - must be <MAJOR>.<MINOR>.<PATCH>[-(rc|beta)<NUMBER>].")

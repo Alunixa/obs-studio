@@ -73,6 +73,9 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:VARIANT -eq 'fixed') {
+            & ./test/replay-buffer/Test-VersionConfig.ps1 -Directory $env:RUNNER_TEMP
+          }
           $Args = @('--preset', 'windows-ci-x64', "-DOBS_VERSION_OVERRIDE=$env:BUILD_VERSION")
           if ($env:VARIANT -eq 'fixed') { $Args += '-DENABLE_REPLAY_TESTS=ON' }
           cmake @Args
