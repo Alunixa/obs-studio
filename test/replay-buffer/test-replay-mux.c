@@ -70,7 +70,7 @@ static void test_io(const char *path, int mode)
 	CHECK(os_unlink(path) == 0);
 }
 
-int main(int argc, char **argv)
+static int test_main(int argc, char **argv)
 {
 	CHECK(argc == 2);
 	long allocations = bnum_allocs();
@@ -86,3 +86,5 @@ int main(int argc, char **argv)
 	puts("PASS muxer normal completion and write/seek/final-close error propagation");
 	return 0;
 }
+
+#include "test-utf8-main.h"

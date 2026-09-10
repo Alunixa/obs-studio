@@ -412,7 +412,7 @@ static void test_pipe_timeout(const char *executable)
 }
 #endif
 
-int main(int argc, char **argv)
+static int test_main(int argc, char **argv)
 {
 #ifdef _WIN32
 	if (argc == 2 && strcmp(argv[1], "--exit") == 0) {
@@ -459,3 +459,5 @@ int main(int argc, char **argv)
 	puts("ALL REPLAY REGRESSION TESTS PASSED");
 	return 0;
 }
+
+#include "test-utf8-main.h"

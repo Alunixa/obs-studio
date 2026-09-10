@@ -108,7 +108,7 @@ static void save_replay(obs_output_t *output)
 	calldata_free(&cd);
 }
 
-int main(int argc, char **argv)
+static int test_main(int argc, char **argv)
 {
 	CHECK(argc == 6 || argc == 7);
 	const char *root = argv[1];
@@ -261,3 +261,5 @@ int main(int argc, char **argv)
 	obs_shutdown();
 	return 0;
 }
+
+#include "test-utf8-main.h"
