@@ -27,28 +27,28 @@
         "obsproject.com/obs-studio": {
           "dependencies": {
               "prebuilt": {
-                  "version": "2026-06-02",
+                  "version": "2026-08-26",
                   "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
                   "label": "Pre-Built obs-deps",
                   "hashes": {
-                      "macos-universal": "459e98f661485a02b500641c7f647bb2420e9e67a4cdf20641987807ac2ab216",
-                      "windows-x64": "9ed086ba79fb174401f7578a82812a161b3c1abb9edb02f85bac8f00253d798f",
-                      "windows-x86": "9fd858048caa7d067f90810c8c4a692bbfe48aa95d2166962deb448bc892cdbe",
-                      "windows-arm64": "fd906649fd78d5fe1eb0b30c7fdd76ddd81fc30d6fbcc989b6a6805572836a23"
+                      "macos-universal": "166560b13be8deb9a1aa7bfd306377a92c3817cecace931fe9732b9a25f0a97a",
+                      "windows-x64": "eb5e67ad110543bcb65a4612bcd654b6427972ea70d26412b48d7e21532dfe67",
+                      "windows-x86": "dc21eb9fbc5c08ea0451950e35eeeeece7537e13d1ec7115803b1b59ea96f9b2",
+                      "windows-arm64": "0648c0fd0887efcb718e437bf9c446b069a50be58e7fcd585497ad8c11644a79"
                   }
               },
               "qt6": {
-                  "version": "2026-06-02",
+                  "version": "2026-08-26",
                   "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
                   "label": "Pre-Built Qt6",
                   "hashes": {
-                      "macos-universal": "a7f972df1fdbe50657955b4613b42dbcbc3201b62a7ed26fb8ef7c7ceff40220",
-                      "windows-x64": "99f2a99e9d86d7737103f3b89934ed6b50dceb10e555801ab6394bd7f8168086",
-                      "windows-arm64": "9fcb34754f44ebdc3f55885eeee1e24cce5d4d83ac6c6472ade252ee0d33c4d4"
+                      "macos-universal": "1f69dcfcdd71f6e319d89736de0290a366fe5d161eae692c6818d20fdfa95c25",
+                      "windows-x64": "7dd60d2883207ecccceb2270538140fccd1b5022e06beedfbc3ba46c7d2e76ae",
+                      "windows-arm64": "a4872414b91252b1d51a3a6d98b6bdd7e3468db19a42c42978670f84eddcb888"
                   },
                   "debugSymbols": {
-                      "windows-x64": "dc8b2421b28bf0592c81f2b880b61cc5819a832371d76404d26ed1950cea9a77",
-                      "windows-arm64": "ec8012dad5963619ec06c227afc69261736eee89ae8ada081469b9b915508098"
+                      "windows-x64": "c69ad24a76c7986aabff1f0e3860f4e650843dcbbcb2e6699daf63914fa888cd",
+                      "windows-arm64": "e39c0ecfdb5fb19a53623aa4914c07e02989f0320e828cc7ed7c18be6b734cc9"
                   }
               },
               "cef": {
@@ -96,7 +96,7 @@
       "generator": "Xcode",
       "binaryDir": "${sourceDir}/build_macos",
       "cacheVariables": {
-        "CMAKE_OSX_DEPLOYMENT_TARGET": {"type": "STRING", "value": "12.0"},
+        "CMAKE_OSX_DEPLOYMENT_TARGET": {"type": "STRING", "value": "13.0"},
         "OBS_CODESIGN_IDENTITY": {"type": "STRING", "value": "$penv{CODESIGN_IDENT}"},
         "OBS_CODESIGN_TEAM": {"type": "STRING", "value": "$penv{CODESIGN_TEAM}"},
         "OBS_PROVISIONING_PROFILE": {"type": "STRING", "value": "$penv{PROVISIONING_PROFILE}"},

@@ -4,6 +4,7 @@
 #include <widgets/OBSBasic.hpp>
 
 #include <qt-wrappers.hpp>
+#include <Idian/Utils.hpp>
 
 #include <QCheckBox>
 #include <QLineEdit>
@@ -68,20 +69,23 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 		iconLabel = new QLabel();
 		iconLabel->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
 		iconLabel->setPixmap(pixmap);
-		iconLabel->setEnabled(sourceVisible);
 		iconLabel->setStyleSheet("background: none");
-		iconLabel->setProperty("class", "source-icon");
+		idian::Utils::addClass(iconLabel, "source-icon");
+		idian::Utils::toggleClass(iconLabel, "text-muted", !sourceVisible);
+		idian::Utils::applyColorToIcon(iconLabel);
 	}
 
 	vis = new QCheckBox();
-	vis->setProperty("class", "checkbox-icon indicator-visibility");
+	idian::Utils::addClass(vis, "checkbox-icon");
+	idian::Utils::addClass(vis, "indicator-visibility");
 	vis->setChecked(sourceVisible);
 	vis->setAccessibleName(QTStr("Basic.Main.Sources.Visibility"));
 	vis->setAccessibleDescription(QTStr("Basic.Main.Sources.VisibilityDescription").arg(name));
 	vis->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
 
 	lock = new QCheckBox();
-	lock->setProperty("class", "checkbox-icon indicator-lock");
+	idian::Utils::addClass(lock, "checkbox-icon");
+	idian::Utils::addClass(lock, "indicator-lock");
 	lock->setChecked(obs_sceneitem_locked(sceneitem));
 	lock->setAccessibleName(QTStr("Basic.Main.Sources.Lock"));
 	lock->setAccessibleDescription(QTStr("Basic.Main.Sources.LockDescription").arg(name));
@@ -90,13 +94,13 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 	label = new OBSSourceLabel(source);
 	label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	label->setAttribute(Qt::WA_TranslucentBackground);
-	label->setEnabled(sourceVisible);
+	idian::Utils::toggleClass(label, "text-muted", !sourceVisible);
 
 	const char *sourceId = obs_source_get_unversioned_id(source);
 	switch (obs_source_load_state(sourceId)) {
 	case OBS_MODULE_DISABLED:
 	case OBS_MODULE_MISSING:
-		label->setStyleSheet("QLabel {color: #CC0000;}");
+		idian::Utils::addClass(label, "text-danger");
 		break;
 	default:
 		break;
@@ -199,12 +203,11 @@ void SourceTreeItem::ReconnectSignals()
 		obs_scene_t *curScene = (obs_scene_t *)calldata_ptr(cd, "scene");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_->tree, "Remove", Q_ARG(OBSSceneItem, curItem),
-						  Q_ARG(OBSScene, curScene));
+			QMetaObject::invokeMethod(this_->tree, &SourceTree::Remove, curItem, curScene);
 			curItem = nullptr;
 		}
 		if (!curItem) {
-			QMetaObject::invokeMethod(this_, "Clear");
+			QMetaObject::invokeMethod(this_, &SourceTreeItem::Clear);
 		}
 	};
 
@@ -214,7 +217,7 @@ void SourceTreeItem::ReconnectSignals()
 		bool visible = calldata_bool(cd, "visible");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_, "VisibilityChanged", Q_ARG(bool, visible));
+			QMetaObject::invokeMethod(this_, &SourceTreeItem::VisibilityChanged, visible);
 		}
 	};
 
@@ -224,7 +227,7 @@ void SourceTreeItem::ReconnectSignals()
 		bool locked = calldata_bool(cd, "locked");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_, "LockedChanged", Q_ARG(bool, locked));
+			QMetaObject::invokeMethod(this_, &SourceTreeItem::LockedChanged, locked);
 		}
 	};
 
@@ -233,7 +236,7 @@ void SourceTreeItem::ReconnectSignals()
 		obs_sceneitem_t *curItem = (obs_sceneitem_t *)calldata_ptr(cd, "item");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_, "Select");
+			QMetaObject::invokeMethod(this_, &SourceTreeItem::Select);
 		}
 	};
 
@@ -242,13 +245,13 @@ void SourceTreeItem::ReconnectSignals()
 		obs_sceneitem_t *curItem = (obs_sceneitem_t *)calldata_ptr(cd, "item");
 
 		if (curItem == this_->sceneitem) {
-			QMetaObject::invokeMethod(this_, "Deselect");
+			QMetaObject::invokeMethod(this_, &SourceTreeItem::Deselect);
 		}
 	};
 
 	auto reorderGroup = [](void *data, calldata_t *) {
 		SourceTreeItem *this_ = static_cast<SourceTreeItem *>(data);
-		QMetaObject::invokeMethod(this_->tree, "ReorderItems");
+		QMetaObject::invokeMethod(this_->tree, &SourceTree::ReorderItems);
 	};
 
 	obs_scene_t *scene = obs_sceneitem_get_scene(sceneitem);
@@ -275,7 +278,7 @@ void SourceTreeItem::ReconnectSignals()
 		SourceTreeItem *this_ = static_cast<SourceTreeItem *>(data);
 		this_->DisconnectSignals();
 		this_->sceneitem = nullptr;
-		QMetaObject::invokeMethod(this_->tree, "RefreshItems");
+		QMetaObject::invokeMethod(this_->tree, &SourceTree::RefreshItems);
 	};
 
 	obs_source_t *source = obs_sceneitem_get_source(sceneitem);
@@ -457,11 +460,11 @@ bool SourceTreeItem::eventFilter(QObject *object, QEvent *event)
 	}
 
 	if (LineEditCanceled(event)) {
-		QMetaObject::invokeMethod(this, "ExitEditMode", Qt::QueuedConnection, Q_ARG(bool, false));
+		QMetaObject::invokeMethod(this, &SourceTreeItem::ExitEditMode, Qt::QueuedConnection, false);
 		return true;
 	}
 	if (LineEditChanged(event)) {
-		QMetaObject::invokeMethod(this, "ExitEditMode", Qt::QueuedConnection, Q_ARG(bool, true));
+		QMetaObject::invokeMethod(this, &SourceTreeItem::ExitEditMode, Qt::QueuedConnection, true);
 		return true;
 	}
 
@@ -471,9 +474,10 @@ bool SourceTreeItem::eventFilter(QObject *object, QEvent *event)
 void SourceTreeItem::VisibilityChanged(bool visible)
 {
 	if (iconLabel) {
-		iconLabel->setEnabled(visible);
+		idian::Utils::toggleClass(iconLabel, "text-muted", !visible);
+		idian::Utils::applyColorToIcon(iconLabel);
 	}
-	label->setEnabled(visible);
+	idian::Utils::toggleClass(label, "text-muted", !visible);
 	vis->setChecked(visible);
 }
 
@@ -539,7 +543,8 @@ void SourceTreeItem::Update(bool force)
 
 	} else if (type == Type::Group) {
 		expand = new QCheckBox();
-		expand->setProperty("class", "checkbox-icon indicator-expand");
+		idian::Utils::addClass(expand, "checkbox-icon");
+		idian::Utils::addClass(expand, "indicator-expand");
 		expand->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
 #ifdef __APPLE__
 		expand->setAttribute(Qt::WA_LayoutUsesWidgetRect);
