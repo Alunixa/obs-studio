@@ -4,6 +4,7 @@
 #include <util/platform.h>
 #include <util/threading.h>
 #include <limits.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -144,25 +145,26 @@ static struct replay_disk_chunk *allocate_chunk(struct replay_disk_store *store,
 	capacity = (capacity + REPLAY_DISK_ALIGNMENT - 1) & ~(REPLAY_DISK_ALIGNMENT - 1);
 	pthread_mutex_lock(&file->mutex);
 	struct replay_disk_chunk *chunk = NULL;
-	/* While saving, append only. Expired ranges are not recycled until the
-	 * muxer has successfully closed the output. */
-	if (!file->reclaim_paused) {
-		struct replay_disk_chunk **slot = &file->free_chunks;
-		while (*slot && (*slot)->capacity < capacity) {
-			slot = &(*slot)->next;
-		}
-		if (*slot) {
-			chunk = *slot;
-			*slot = chunk->next;
-		}
+	/* Already-free extents may be written without deleting any protected
+	 * data. Newly expired extents stay deferred until a successful save.
+	 * Reusing pre-save free space bounds repeated saves on non-sparse disks. */
+	struct replay_disk_chunk **slot = &file->free_chunks;
+	while (*slot && (*slot)->capacity < capacity) {
+		slot = &(*slot)->next;
 	}
-	if (!chunk && file->reserved_bytes <= INT64_MAX - capacity) {
+	if (*slot) {
+		chunk = *slot;
+		*slot = chunk->next;
+	}
+	if (!chunk && capacity <= store->max_bytes && file->reserved_bytes <= store->max_bytes - capacity) {
 		chunk = bzalloc(sizeof(*chunk));
 		chunk->backing = file;
 		chunk->offset = file->reserved_bytes;
 		chunk->capacity = capacity;
 		file->reserved_bytes += capacity;
 	}
+	if (!chunk)
+		errno = EFBIG;
 	if (chunk) {
 		chunk->refs = 1;
 		chunk->size = 0;
@@ -176,6 +178,12 @@ static struct replay_disk_chunk *allocate_chunk(struct replay_disk_store *store,
 
 static bool replay_disk_new_chunk(struct replay_disk_store *store, size_t size)
 {
+	uint64_t capacity = size > (uint64_t)store->chunk_limit ? size : (uint64_t)store->chunk_limit;
+	uint64_t available = os_get_free_disk_space(store->directory.array);
+	if (available < store->min_free_bytes || capacity > available - store->min_free_bytes) {
+		errno = ENOSPC;
+		return false;
+	}
 	struct replay_disk_chunk *chunk = allocate_chunk(store, size);
 	if (!chunk) {
 		return false;
@@ -188,8 +196,9 @@ static bool replay_disk_new_chunk(struct replay_disk_store *store, size_t size)
 	return true;
 }
 
-bool replay_disk_open(struct replay_disk_store *store, const char *directory)
+bool replay_disk_open(struct replay_disk_store *store, const char *directory, const struct replay_disk_options *options)
 {
+	errno = 0;
 	if (!directory || !*directory || store->file || store->backing || store->chunk) {
 		return false;
 	}
@@ -224,10 +233,22 @@ bool replay_disk_open(struct replay_disk_store *store, const char *directory)
 	}
 	backing->file_created = true;
 	setvbuf(file, NULL, _IOFBF, 1024 * 1024);
+	store->max_bytes = options && options->max_bytes > 0 ? options->max_bytes : 2LL * 1024 * 1024 * 1024;
+	store->min_free_bytes = options && options->min_free_bytes ? options->min_free_bytes : 256LL * 1024 * 1024;
 #ifdef _WIN32
 	HANDLE handle = (HANDLE)_get_osfhandle(_fileno(file));
+	wchar_t filesystem[32] = {0};
+	if (GetVolumeInformationByHandleW(handle, NULL, 0, NULL, NULL, NULL, filesystem, 32) &&
+	    (_wcsicmp(filesystem, L"FAT32") == 0 || _wcsicmp(filesystem, L"FAT") == 0) &&
+	    store->max_bytes > UINT32_MAX) {
+		fclose(file);
+		replay_disk_file_release(backing);
+		errno = EFBIG;
+		return false;
+	}
 	DWORD returned = 0;
-	if (DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &backing->reclaim_handle, 0, FALSE,
+	if ((!options || !options->disable_sparse) &&
+	    DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &backing->reclaim_handle, 0, FALSE,
 			    DUPLICATE_SAME_ACCESS)) {
 		backing->sparse =
 			!!DeviceIoControl(backing->reclaim_handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &returned, NULL);

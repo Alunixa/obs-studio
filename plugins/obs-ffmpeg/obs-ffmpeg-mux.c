@@ -23,6 +23,7 @@
 #endif
 
 #include <libavformat/avformat.h>
+#include <errno.h>
 
 #define do_log(level, format, ...) \
 	blog(level, "[ffmpeg muxer: '%s'] " format, obs_output_get_name(stream->output), ##__VA_ARGS__)
@@ -64,7 +65,11 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	stream->cur_time = 0;
 	stream->max_size = 0;
 	stream->max_time = 0;
+	if (stream->is_replay_buffer)
+		pthread_mutex_lock(&stream->replay_mutex);
 	stream->save_ts = 0;
+	if (stream->is_replay_buffer)
+		pthread_mutex_unlock(&stream->replay_mutex);
 	stream->keyframes = 0;
 }
 
@@ -83,6 +88,8 @@ static void ffmpeg_mux_destroy(void *data)
 	deque_free(&stream->packets);
 	replay_disk_end_save(stream->disk_save, false);
 	replay_disk_close(&stream->disk_store);
+	if (stream->is_replay_buffer)
+		pthread_mutex_destroy(&stream->replay_mutex);
 
 	os_process_pipe_destroy(stream->pipe);
 	dstr_free(&stream->path);
@@ -972,8 +979,9 @@ static void save_replay_proc(void *data, calldata_t *cd)
 			return;
 		}
 
+		pthread_mutex_lock(&stream->replay_mutex);
 		stream->save_ts = os_gettime_ns() / 1000LL;
-		blog(LOG_DEBUG, "[replay buffer] Save requested at %" PRId64, stream->save_ts);
+		pthread_mutex_unlock(&stream->replay_mutex);
 	}
 }
 
@@ -991,6 +999,10 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
 	stream->is_replay_buffer = true;
+	if (pthread_mutex_init(&stream->replay_mutex, NULL) != 0) {
+		bfree(stream);
+		return NULL;
+	}
 
 	proc_handler_t *ph = obs_output_get_proc_handler(output);
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
@@ -1040,9 +1052,17 @@ static bool replay_buffer_start(void *data)
 
 	if (stream->storage_mode == 1) {
 		const char *dir = obs_data_get_string(s, "directory");
-		if (!replay_disk_open(&stream->disk_store, dir)) {
+		const int64_t margin = 64LL * 1024 * 1024;
+		const int64_t limit = stream->max_size > 0 && stream->max_size <= (INT64_MAX - margin) / 2
+					      ? stream->max_size * 2 + margin
+					      : 0;
+		struct replay_disk_options options = {.max_bytes = limit};
+		if (!replay_disk_open(&stream->disk_store, dir, &options)) {
+			const int error = errno;
 			warn("Failed to create temporary disk replay buffer in '%s'", dir);
-			obs_output_set_last_error(stream->output, obs_module_text("ReplayBuffer.DiskError"));
+			obs_output_set_last_error(stream->output,
+						  obs_module_text(error == EFBIG ? "ReplayBuffer.FileLimit"
+										 : "ReplayBuffer.DiskError"));
 			obs_data_release(s);
 			return false;
 		}
@@ -1378,8 +1398,11 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	if (stream->storage_mode == 1) {
 		if (!replay_disk_write(&stream->disk_store, packet->data, packet->size, &rb_pkt.disk_chunk,
 				       &rb_pkt.disk_offset)) {
+			const int error = errno;
 			warn("Failed to write disk replay buffer; stopping instead of keeping corrupt packets");
-			obs_output_set_last_error(stream->output, obs_module_text("ReplayBuffer.DiskError"));
+			obs_output_set_last_error(stream->output, obs_module_text(error == EFBIG || error == ENOSPC
+											  ? "ReplayBuffer.SpaceLimit"
+											  : "ReplayBuffer.DiskError"));
 			deactivate_replay_buffer(stream, OBS_OUTPUT_ERROR);
 			return;
 		}
@@ -1400,7 +1423,10 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 		stream->keyframes++;
 	}
 
-	if (stream->save_ts && packet->sys_dts_usec >= stream->save_ts) {
+	pthread_mutex_lock(&stream->replay_mutex);
+	int64_t save_ts = stream->save_ts;
+	pthread_mutex_unlock(&stream->replay_mutex);
+	if (save_ts && packet->sys_dts_usec >= save_ts) {
 		if (os_atomic_load_bool(&stream->muxing)) {
 			return;
 		}
@@ -1410,7 +1436,10 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 			stream->mux_thread_joinable = false;
 		}
 
-		stream->save_ts = 0;
+		pthread_mutex_lock(&stream->replay_mutex);
+		if (stream->save_ts == save_ts)
+			stream->save_ts = 0;
+		pthread_mutex_unlock(&stream->replay_mutex);
 		replay_buffer_save(stream);
 	}
 }

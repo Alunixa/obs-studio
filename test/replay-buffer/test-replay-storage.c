@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -54,8 +55,8 @@ static void test_lifetime(const char *directory)
 	uint8_t result[513];
 	memset(data, 0xa7, sizeof(data));
 
-	CHECK(!replay_disk_open(&store, ""));
-	CHECK(replay_disk_open(&store, directory));
+	CHECK(!replay_disk_open(&store, "", NULL));
+	CHECK(replay_disk_open(&store, directory, NULL));
 	CHECK(!replay_disk_write(&store, NULL, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(!replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
@@ -69,7 +70,7 @@ static void test_lifetime(const char *directory)
 	replay_disk_chunk_release(chunk);
 	replay_disk_close(&store);
 	CHECK(chunk_count(directory) == 1);
-	CHECK(replay_disk_open(&store, directory));
+	CHECK(replay_disk_open(&store, directory, NULL));
 	CHECK(replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
 	CHECK(memcmp(data, result, sizeof(data)) == 0);
 	replay_disk_chunk_release(chunk);
@@ -103,7 +104,7 @@ static void test_concurrent_save(const char *directory)
 	struct replay_disk_store store = {0};
 	struct saved_packet packets[64] = {0};
 	uint8_t data[4096];
-	CHECK(replay_disk_open(&store, directory));
+	CHECK(replay_disk_open(&store, directory, NULL));
 	store.chunk_limit = 16384;
 	for (size_t i = 0; i < 64; i++) {
 		memset(data, (uint8_t)i, sizeof(data));
@@ -157,7 +158,7 @@ static uint64_t allocated_size(const struct replay_disk_store *store)
 }
 #endif
 
-static void test_deferred_reclamation(const char *directory)
+static void test_deferred_reclamation(const char *directory, bool disable_sparse)
 {
 	struct replay_disk_store store = {0};
 	struct replay_disk_reader reader = {0};
@@ -166,7 +167,8 @@ static void test_deferred_reclamation(const char *directory)
 	int64_t old_offset, retained_offset, extra_offset;
 	uint8_t *data = bmalloc(65536);
 	uint8_t *result = bmalloc(65536);
-	CHECK(replay_disk_open(&store, directory));
+	struct replay_disk_options options = {.disable_sparse = disable_sparse};
+	CHECK(replay_disk_open(&store, directory, &options));
 	store.chunk_limit = 65536;
 	memset(data, 0x41, 65536);
 	CHECK(replay_disk_write(&store, data, 65536, &old, &old_offset));
@@ -201,6 +203,7 @@ static void test_deferred_reclamation(const char *directory)
 	replay_disk_end_save(save, true);
 	replay_disk_get_stats(&store, &after);
 	CHECK(!after.reclaim_paused && after.deferred_bytes == 0 && after.reusable_bytes == 2 * 65536);
+	CHECK(!disable_sparse || !after.sparse);
 	CHECK(replay_disk_read(&reader, retained, retained_offset, result, 65536));
 	for (size_t i = 0; i < 65536; i++) {
 		CHECK(result[i] == 0x42);
@@ -233,6 +236,56 @@ static void test_deferred_reclamation(const char *directory)
 	puts("PASS failed save defers reclamation; successful retry frees only expired extents; bounded reuse");
 }
 
+static void test_space_limits(const char *directory)
+{
+	struct replay_disk_store store = {0};
+	struct replay_disk_reader reader = {0};
+	struct replay_disk_options options = {.max_bytes = 2 * 65536, .disable_sparse = true};
+	struct replay_disk_chunk *retained = NULL;
+	struct replay_disk_chunk *extra = NULL;
+	int64_t retained_offset = 0;
+	int64_t extra_offset = 0;
+	uint8_t bytes[65536] = {0x6a};
+	uint8_t result[65536];
+	CHECK(replay_disk_open(&store, directory, &options));
+	store.chunk_limit = 65536;
+	CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &retained, &retained_offset));
+	struct replay_disk_file *save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
+	CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &extra, &extra_offset));
+	replay_disk_chunk_release(extra);
+	CHECK(replay_disk_seal(&store));
+	errno = 0;
+	CHECK(!replay_disk_write(&store, bytes, sizeof(bytes), &extra, &extra_offset));
+	CHECK(errno == EFBIG && extra == NULL);
+	CHECK(replay_disk_read(&reader, retained, retained_offset, result, sizeof(result)));
+	CHECK(memcmp(bytes, result, sizeof(bytes)) == 0);
+	replay_disk_end_save(save, true);
+	/* Each save can use ranges that were already free before it began.
+	 * Even without sparse support, repeated saves do not grow the file. */
+	for (int i = 0; i < 128; i++) {
+		save = replay_disk_begin_save(&store);
+		CHECK(save != NULL);
+		CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &extra, &extra_offset));
+		CHECK(replay_disk_seal(&store));
+		replay_disk_chunk_release(extra);
+		replay_disk_end_save(save, true);
+	}
+	struct replay_disk_stats stats;
+	replay_disk_get_stats(&store, &stats);
+	CHECK(!stats.sparse && stats.reserved_bytes == options.max_bytes);
+	CHECK(replay_disk_read(&reader, retained, retained_offset, result, sizeof(result)));
+	CHECK(memcmp(bytes, result, sizeof(bytes)) == 0);
+	store.min_free_bytes = UINT64_MAX;
+	CHECK(!replay_disk_write(&store, bytes, sizeof(bytes), &extra, &extra_offset));
+	CHECK(errno == ENOSPC && extra == NULL);
+	replay_disk_chunk_release(retained);
+	replay_disk_reader_close(&reader);
+	replay_disk_close(&store);
+	CHECK(chunk_count(directory) == 0);
+	puts("PASS non-sparse fallback; 128 saves at fixed file size; budget/free-space failures preserve live data");
+}
+
 static void test_failures(const char *directory)
 {
 	struct replay_disk_store store = {0};
@@ -244,8 +297,8 @@ static void test_failures(const char *directory)
 	struct dstr pattern = {0};
 
 	dstr_printf(&pattern, "%s/nonexistent/child", directory);
-	CHECK(!replay_disk_open(&store, pattern.array));
-	CHECK(replay_disk_open(&store, directory));
+	CHECK(!replay_disk_open(&store, pattern.array, NULL));
+	CHECK(replay_disk_open(&store, directory, NULL));
 	store.chunk_limit = 1;
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_seal(&store)); /* Packet larger than a chunk is valid. */
@@ -260,7 +313,7 @@ static void test_failures(const char *directory)
 	CHECK(chunk_count(directory) == 0);
 
 	/* A read-only stream deterministically injects a write failure. */
-	CHECK(replay_disk_open(&store, directory));
+	CHECK(replay_disk_open(&store, directory, NULL));
 	CHECK(fclose(store.file) == 0);
 	store.file = os_fopen(replay_disk_path(&store), "rb");
 	CHECK(store.file != NULL);
@@ -277,8 +330,8 @@ static void test_instances(const char *directory)
 	for (int i = 0; i < 50; i++) {
 		struct replay_disk_store a = {0};
 		struct replay_disk_store b = {0};
-		CHECK(replay_disk_open(&a, directory));
-		CHECK(replay_disk_open(&b, directory));
+		CHECK(replay_disk_open(&a, directory, NULL));
+		CHECK(replay_disk_open(&b, directory, NULL));
 		CHECK(chunk_count(directory) == 2);
 		replay_disk_close(&a);
 		replay_disk_close(&b);
@@ -382,12 +435,14 @@ int main(int argc, char **argv)
 	long allocations = bnum_allocs();
 	char *uuid = os_generate_uuid();
 	struct dstr directory = {0};
-	dstr_printf(&directory, "%s/replay-tests-%s", argv[1], uuid);
+	dstr_printf(&directory, "%s/replay-tests-中文 (space)-%s", argv[1], uuid);
 	bfree(uuid);
 	CHECK(os_mkdirs(directory.array) == 0);
 	test_lifetime(directory.array);
 	test_concurrent_save(directory.array);
-	test_deferred_reclamation(directory.array);
+	test_deferred_reclamation(directory.array, false);
+	test_deferred_reclamation(directory.array, true);
+	test_space_limits(directory.array);
 	test_failures(directory.array);
 	test_instances(directory.array);
 	test_frame_layout();

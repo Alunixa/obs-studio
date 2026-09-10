@@ -8,12 +8,20 @@
 struct replay_disk_chunk;
 struct replay_disk_file;
 
+struct replay_disk_options {
+	int64_t max_bytes;
+	uint64_t min_free_bytes;
+	bool disable_sparse;
+};
+
 struct replay_disk_store {
 	struct dstr directory;
 	FILE *file;
 	struct replay_disk_file *backing;
 	struct replay_disk_chunk *chunk;
 	int64_t chunk_limit;
+	int64_t max_bytes;
+	uint64_t min_free_bytes;
 };
 
 struct replay_disk_reader {
@@ -30,7 +38,8 @@ struct replay_disk_stats {
 	bool sparse;
 };
 
-bool replay_disk_open(struct replay_disk_store *store, const char *directory);
+bool replay_disk_open(struct replay_disk_store *store, const char *directory,
+		      const struct replay_disk_options *options);
 bool replay_disk_seal(struct replay_disk_store *store);
 void replay_disk_close(struct replay_disk_store *store);
 /* The token survives stop/restart. Failure keeps reclamation paused until a

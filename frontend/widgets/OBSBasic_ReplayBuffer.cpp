@@ -206,6 +206,8 @@ void OBSBasic::ReplayBufferStop(int code)
 	if (!outputHandler || !outputHandler->replayBuffer) {
 		return;
 	}
+	const char *lastError = obs_output_get_last_error(outputHandler->replayBuffer);
+	const QString errorMessage = lastError && *lastError ? QT_UTF8(lastError) : QTStr("Output.RecordError.Msg");
 
 	emit ReplayBufStopped();
 
@@ -222,7 +224,7 @@ void OBSBasic::ReplayBufferStop(int code)
 		OBSMessageBox::warning(this, QTStr("Output.RecordNoSpace.Title"), QTStr("Output.RecordNoSpace.Msg"));
 
 	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
-		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"), QTStr("Output.RecordError.Msg"));
+		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"), errorMessage);
 
 	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"), QSystemTrayIcon::Warning);
@@ -231,7 +233,7 @@ void OBSBasic::ReplayBufferStop(int code)
 		SysTrayNotify(QTStr("Output.RecordNoSpace.Msg"), QSystemTrayIcon::Warning);
 
 	} else if (code != OBS_OUTPUT_SUCCESS && !isVisible()) {
-		SysTrayNotify(QTStr("Output.RecordError.Msg"), QSystemTrayIcon::Warning);
+		SysTrayNotify(errorMessage, QSystemTrayIcon::Warning);
 	}
 
 	OnEvent(OBS_FRONTEND_EVENT_REPLAY_BUFFER_STOPPED);
