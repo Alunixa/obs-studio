@@ -45,6 +45,13 @@ foreach ($Name in $Cases) {
     }
     $Process.WaitForExit()
     if ($Process.ExitCode -ne 0) { throw "Encoding failed: $Name; see logs in $Out" }
+    $Log = Get-Content -LiteralPath (Join-Path $Out 'encode.log') -Raw
+    $Lag = [regex]::Match($Log, 'skipped frames due to encoding lag: \d+/\d+ \(([\d.]+)%\)')
+    $LagPercent = if ($Lag.Success) {
+        [double]::Parse($Lag.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+    } else { 0 }
+    $StopWaits = @([regex]::Matches($Log, 'STOP WAIT [^\r\n]+: (\d+) ms') |
+        ForEach-Object { [long]$_.Groups[1].Value })
     $Files = @(Get-ChildItem -LiteralPath $Out -Filter '*.mkv' -File)
     $Expected = if ($Case[3]) { 4 } else { 3 }
     if ($Files.Count -ne $Expected) { throw "Wrong output count for $Name" }
@@ -56,7 +63,8 @@ foreach ($Name in $Cases) {
         $Video = @($Probe.streams | Where-Object codec_type -eq video)[0]
         $Width = if ($Case[3]) { 1280 } else { 2560 }
         $Height = if ($Case[3]) { 720 } else { 1440 }
-        if ($Video.pix_fmt -ne $Case[4] -or $Video.width -ne $Width -or $Video.height -ne $Height) {
+        if ($Video.pix_fmt -ne $Case[4] -or $Video.width -ne $Width -or $Video.height -ne $Height -or
+            $Video.r_frame_rate -ne '60/1') {
             throw "Unexpected output format: $($File.Name)"
         }
         if ($Case[3] -and $File.Name -like 'Replay*' -and [double]$Probe.format.duration -lt 3.75) {
@@ -76,6 +84,8 @@ foreach ($Name in $Cases) {
             FPS = $Video.r_frame_rate
             PixelFormat = $Video.pix_fmt
             Decode = 'PASS'
+            EncodingLagPercent = $LagPercent
+            StopWaitMilliseconds = $StopWaits
         }
     }
     if (@(Get-ChildItem -LiteralPath $Out -Recurse -Filter 'cache.tmp' -File).Count) {
@@ -83,6 +93,7 @@ foreach ($Name in $Cases) {
     }
     $Results | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $Manifest -Encoding utf8
     Write-Output "PASS ${Name}: $Expected files fully decoded; no cache remaining"
+    Write-Output "PERFORMANCE ${Name}: encoding lag=$LagPercent%; stop waits=$($StopWaits -join ',') ms"
 }
 $Results | Format-Table Case, File, Duration, Width, Height, PixelFormat, Decode -AutoSize
 Write-Output "VERIFIED_FILES=$($Results.Count)"
