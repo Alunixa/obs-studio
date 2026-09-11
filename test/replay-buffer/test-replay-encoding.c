@@ -121,6 +121,7 @@ static int test_main(int argc, char **argv)
 								  : VIDEO_FORMAT_NV12;
 	int storage_mode = atoi(argv[5]);
 	bool window_test = argc == 7 && strcmp(argv[6], "window") == 0;
+	bool detail_test = argc == 7 && strncmp(argv[6], "detail:", 7) == 0;
 	CHECK(os_mkdirs(directory) >= 0);
 	CHECK(obs_startup("en-US", NULL, NULL));
 	struct dstr path = {0};
@@ -137,23 +138,35 @@ static int test_main(int argc, char **argv)
 		.output_format = format,
 		.gpu_conversion = true,
 		.colorspace = VIDEO_CS_709,
-		.range = VIDEO_RANGE_PARTIAL,
+		.range = detail_test ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL,
 		.scale_type = OBS_SCALE_BILINEAR,
 	};
 	CHECK(obs_reset_video(&video) == OBS_VIDEO_SUCCESS);
 	load_module(root, "obs-ffmpeg");
 	load_module(root, strstr(encoder_id, "nvenc") ? "obs-nvenc" : "obs-x264");
+	if (detail_test)
+		load_module(root, "image-source");
 	obs_register_source(&test_sinewave);
 	obs_register_source(&test_random);
 	obs_post_load_modules();
 
-	obs_source_t *random = obs_source_create("random", "Synthetic video", NULL, NULL);
+	obs_data_t *image_settings = obs_data_create();
+	if (detail_test)
+		obs_data_set_string(image_settings, "file", argv[6] + 7);
+	obs_source_t *random = obs_source_create(detail_test ? "image_source" : "random", "Synthetic video",
+						image_settings, NULL);
+	obs_data_release(image_settings);
 	obs_source_t *sine = obs_source_create("test_sinewave", "Synthetic audio", NULL, NULL);
 	CHECK(random && sine);
 	obs_scene_t *scene = obs_scene_create("Synthetic scene");
 	obs_sceneitem_t *item = obs_scene_add(scene, random);
 	CHECK(item != NULL);
-	struct vec2 scale = {.x = (float)video.base_width / 20.0f, .y = (float)video.base_height / 20.0f};
+	if (detail_test) {
+		CHECK(obs_source_get_width(random) == video.base_width);
+		CHECK(obs_source_get_height(random) == video.base_height);
+	}
+	struct vec2 scale = {.x = detail_test ? 1.0f : (float)video.base_width / 20.0f,
+			     .y = detail_test ? 1.0f : (float)video.base_height / 20.0f};
 	obs_sceneitem_set_scale(item, &scale);
 	obs_set_output_source(0, obs_scene_get_source(scene));
 	obs_set_output_source(1, sine);
@@ -168,6 +181,11 @@ static int test_main(int argc, char **argv)
 	obs_data_set_string(settings, "multipass", "qres");
 	obs_data_set_bool(settings, "lookahead", false);
 	obs_data_set_int(settings, "bf", 0);
+	if (detail_test) {
+		obs_data_set_string(settings, "preset", "p5");
+		obs_data_set_string(settings, "multipass", "disabled");
+		obs_data_set_bool(settings, "adaptive_quantization", false);
+	}
 	obs_encoder_t *vencoder = obs_video_encoder_create(encoder_id, "Regression video", settings, NULL);
 	obs_data_release(settings);
 	CHECK(vencoder != NULL);
