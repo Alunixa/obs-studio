@@ -153,8 +153,8 @@ static int test_main(int argc, char **argv)
 	obs_data_t *image_settings = obs_data_create();
 	if (detail_test)
 		obs_data_set_string(image_settings, "file", argv[6] + 7);
-	obs_source_t *random = obs_source_create(detail_test ? "image_source" : "random", "Synthetic video",
-						image_settings, NULL);
+	obs_source_t *random =
+		obs_source_create(detail_test ? "image_source" : "random", "Synthetic video", image_settings, NULL);
 	obs_data_release(image_settings);
 	obs_source_t *sine = obs_source_create("test_sinewave", "Synthetic audio", NULL, NULL);
 	CHECK(random && sine);
