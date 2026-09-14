@@ -373,8 +373,16 @@ static void test_abrupt_exit(const char *executable, const char *directory)
 	os_glob_t *files = NULL;
 	dstr_printf(&pattern, "%s/OBS-Replay-Cache/*", directory);
 	CHECK(os_glob(pattern.array, 0, &files) == 0);
-	for (size_t i = 0; files && i < files->gl_pathc; i++)
-		CHECK(os_rmdir(files->gl_pathv[i].path) == 0);
+	for (size_t i = 0; files && i < files->gl_pathc; i++) {
+		const char *path = files->gl_pathv[i].path;
+		const char *name = strrchr(path, '/');
+		CHECK(name != NULL);
+		name++;
+		if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+			continue;
+		CHECK(files->gl_pathv[i].directory && strlen(name) == UUID_STR_LENGTH);
+		CHECK(os_rmdir(path) == 0);
+	}
 	os_globfree(files);
 	dstr_free(&pattern);
 	puts("PASS process exit without replay destructors leaves no allocated cache file");

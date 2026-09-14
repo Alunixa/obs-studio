@@ -17,6 +17,7 @@ $Matrix = @{
     'window-nv12' = @('obs_nvenc_h264_tex', 'NV12', '1', 'window', 'yuv420p')
     'window-p010' = @('obs_nvenc_hevc_tex', 'P010', '1', 'window', 'yuv420p10le')
     'window-x264' = @('obs_x264', 'NV12', '1', 'window', 'yuv420p')
+    'window-x264-failed-stop' = @('obs_x264', 'NV12', '1', 'window-failed-stop', 'yuv420p')
     'window-ram' = @('obs_nvenc_hevc_tex', 'I444', '0', 'window', 'yuv444p')
     'quality-i444' = @('obs_nvenc_hevc_tex', 'I444', '1', '', 'yuv444p')
     'quality-p010' = @('obs_nvenc_hevc_tex', 'P010', '1', '', 'yuv420p10le')
@@ -53,7 +54,7 @@ foreach ($Name in $Cases) {
     $StopWaits = @([regex]::Matches($Log, 'STOP WAIT [^\r\n]+: (\d+) ms') |
         ForEach-Object { [long]$_.Groups[1].Value })
     $Files = @(Get-ChildItem -LiteralPath $Out -Filter '*.mkv' -File)
-    $Expected = if ($Case[3]) { 4 } else { 3 }
+    $Expected = if ($Case[3] -eq 'window') { 4 } else { 3 }
     if ($Files.Count -ne $Expected) { throw "Wrong output count for $Name" }
     foreach ($File in $Files) {
         $ProbeText = & ffprobe -v error -show_entries `
@@ -70,7 +71,7 @@ foreach ($Name in $Cases) {
         if ($Case[3] -and $File.Name -like 'Replay*' -and [double]$Probe.format.duration -lt 3.75) {
             throw "Replay window unexpectedly reset: $($File.Name)"
         }
-        & ffmpeg -hide_banner -loglevel error -xerror -err_detect explode -i $File.FullName `
+        & ffmpeg -hide_banner -loglevel error -threads 2 -xerror -err_detect explode -i $File.FullName `
             -map 0:v:0 -map '0:a?' -f null - 2> "$($File.FullName).decode.log"
         if ($LASTEXITCODE) { throw "Full decode failed: $($File.Name)" }
         $Results += [pscustomobject]@{

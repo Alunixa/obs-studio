@@ -120,7 +120,8 @@ static int test_main(int argc, char **argv)
 				   : strcmp(argv[4], "P010") == 0 ? VIDEO_FORMAT_P010
 								  : VIDEO_FORMAT_NV12;
 	int storage_mode = atoi(argv[5]);
-	bool window_test = argc == 7 && strcmp(argv[6], "window") == 0;
+	bool failed_stop_test = argc == 7 && strcmp(argv[6], "window-failed-stop") == 0;
+	bool window_test = failed_stop_test || (argc == 7 && strcmp(argv[6], "window") == 0);
 	bool detail_test = argc == 7 && strncmp(argv[6], "detail:", 7) == 0;
 	CHECK(os_mkdirs(directory) >= 0);
 	CHECK(obs_startup("en-US", NULL, NULL));
@@ -250,17 +251,30 @@ static int test_main(int argc, char **argv)
 		CHECK(os_atomic_load_long(&saved_count) == 2);
 		if (storage_mode == 1)
 			check_single_cache(directory);
-		settings = obs_output_get_settings(replay);
-		obs_data_set_string(settings, "directory", directory);
-		obs_output_update(replay, settings);
-		obs_data_release(settings);
-		os_sleep_ms(250);
-		save_replay(replay);
-		wait_count(&saved_count, 3);
-		CHECK(obs_output_active(replay));
+		if (failed_stop_test) {
+			/* Let the live window expire beyond the protected snapshot,
+			 * then fail again instead of rescuing cleanup with success. */
+			for (long attempt = 2; attempt <= 4; attempt++) {
+				os_sleep_ms(2000);
+				save_replay(replay);
+				wait_count(&failed_count, attempt);
+				CHECK(obs_output_active(replay));
+			}
+		} else {
+			settings = obs_output_get_settings(replay);
+			obs_data_set_string(settings, "directory", directory);
+			obs_output_update(replay, settings);
+			obs_data_release(settings);
+			os_sleep_ms(250);
+			save_replay(replay);
+			wait_count(&saved_count, 3);
+			CHECK(obs_output_active(replay));
+		}
 		CHECK(os_unlink(blocker.array) == 0);
 		dstr_free(&blocker);
-		puts("PASS continuous five-second window, 250ms save spacing, failed export and successful retry");
+		puts(failed_stop_test
+			     ? "PASS rolling window and repeated failed saves before explicit stop"
+			     : "PASS continuous five-second window, 250ms save spacing, failed export and successful retry");
 	}
 	/* Both outputs share an encoder. Request both stops at the same media
 	 * timestamp; do not create a second, growing backlog while waiting for
@@ -268,7 +282,7 @@ static int test_main(int argc, char **argv)
 	obs_output_stop(replay);
 	obs_output_stop(recording);
 	wait_output_stopped(replay, window_test ? 15000 : 60000);
-	wait_count(&saved_count, window_test ? 3 : 2);
+	wait_count(&saved_count, window_test && !failed_stop_test ? 3 : 2);
 	wait_output_stopped(recording, window_test ? 15000 : 60000);
 	printf("PASS %s %s storage=%d: recording and %ld replay saves at %ux%u/60\n", encoder_id, argv[4], storage_mode,
 	       os_atomic_load_long(&saved_count), video.output_width, video.output_height);
