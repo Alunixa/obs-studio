@@ -1,10 +1,11 @@
 name: Alunixa Windows Build and Release
-run-name: OBS disk replay stability ${{ github.sha }}
+run-name: OBS replay cache cleanup ${{ github.sha }}
 
 on:
   push:
     branches:
       - codex/obs-replay-stability-20260910
+      - codex/obs-replay-integrity-20260915
   workflow_dispatch:
 
 permissions:
@@ -46,8 +47,8 @@ jobs:
             $Skip = $LASTEXITCODE -eq 0
           } else {
             $Ref = $env:GITHUB_SHA
-            $Tag = "alunixa-20260910-$($Ref.Substring(0,9))"
-            $Version = '32.2.2-alunixa.20260910.2'
+            $Tag = "alunixa-20260915-$($Ref.Substring(0,9))"
+            $Version = '32.2.2-alunixa.20260915.1'
             $Skip = $false
           }
           "ref=$Ref" >> $env:GITHUB_OUTPUT
@@ -123,8 +124,9 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           $Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $Title = "Alunixa OBS - 2026-09-10 - $env:VARIANT"
+          $Title = "Alunixa OBS - 回放缓存回收修复 - 2026-09-15 - Windows x64"
           if ($env:VARIANT -eq 'archive') {
+            $Title = "Alunixa OBS - 2026-09-10 - archive"
             $Notes = @"
           ## Original disk replay archive
           Original source preserved before upstream synchronization and repairs.
@@ -135,12 +137,13 @@ jobs:
           The full matching Windows runtime was rebuilt by GitHub Actions.
           "@
           } else {
-            $Notes = Get-Content -LiteralPath ../tooling/docs/alunixa-obs-stability-20260910.md -Raw
+            $Notes = Get-Content -LiteralPath ../tooling/docs/alunixa-replay-cache-20260915.md -Raw
           }
           $Notes += "`n`n## Build evidence`n- Source: $env:SOURCE_REF`n- GitHub Actions: $Run`n"
           $Notes += "- Critical DLL dependency loading: PASS`n"
           if ($env:VARIANT -eq 'fixed') {
-            $Notes += "- Disk replay, NVENC frame layout and probe timeout regressions: PASS`n"
+            $Notes += "- Bounded failed-save retention, sparse/non-sparse lifecycle, abrupt process-exit cleanup, muxer I/O errors, frame layout and probe timeout regressions: PASS`n"
+            $Notes += "- VLC visual corruption/color shift: unresolved; no visual-fix claim in this release.`n"
           }
           $Notes += "`n``````text`n$(Get-Content build_x64/SHA256SUMS.txt -Raw)```````n"
           $Notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
