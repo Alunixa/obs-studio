@@ -42,8 +42,8 @@ bool replay_disk_open(struct replay_disk_store *store, const char *directory,
 		      const struct replay_disk_options *options);
 bool replay_disk_seal(struct replay_disk_store *store);
 void replay_disk_close(struct replay_disk_store *store);
-/* The token survives stop/restart. Failure keeps reclamation paused until a
- * later successful save, or until the session is explicitly closed. */
+/* The token survives stop/restart. Both outcomes resume reclamation; callers
+ * must keep packet references for any failed snapshot they wish to preserve. */
 struct replay_disk_file *replay_disk_begin_save(struct replay_disk_store *store);
 void replay_disk_end_save(struct replay_disk_file *token, bool success);
 const char *replay_disk_path(const struct replay_disk_store *store);

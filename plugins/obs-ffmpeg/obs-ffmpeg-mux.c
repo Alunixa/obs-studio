@@ -52,6 +52,25 @@ static void rb_packet_release(struct rb_packet *packet)
 	packet->disk_chunk = NULL;
 }
 
+static void release_mux_packets(mux_packets_t *packets)
+{
+	for (size_t i = 0; i < packets->num; i++)
+		rb_packet_release(&packets->array[i]);
+	da_free(*packets);
+}
+
+static void replay_buffer_release_failed_snapshot(struct ffmpeg_muxer *stream)
+{
+	if (!stream->is_replay_buffer)
+		return;
+	mux_packets_t packets = {0};
+	pthread_mutex_lock(&stream->replay_mutex);
+	packets = stream->failed_mux_packets;
+	da_init(stream->failed_mux_packets);
+	pthread_mutex_unlock(&stream->replay_mutex);
+	release_mux_packets(&packets);
+}
+
 static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 {
 	while (stream->packets.size > 0) {
@@ -71,12 +90,15 @@ static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
 	if (stream->is_replay_buffer)
 		pthread_mutex_unlock(&stream->replay_mutex);
 	stream->keyframes = 0;
+	replay_buffer_release_failed_snapshot(stream);
 }
 
 static void ffmpeg_mux_destroy(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
 
+	if (stream->is_replay_buffer)
+		os_atomic_set_bool(&stream->active, false);
 	replay_buffer_clear(stream);
 	if (stream->mux_thread_joinable) {
 		pthread_join(stream->mux_thread, NULL);
@@ -1194,6 +1216,24 @@ static void replay_buffer_save_failed(struct ffmpeg_muxer *stream)
 	calldata_free(&cd);
 }
 
+static void replay_buffer_finish_snapshot(struct ffmpeg_muxer *stream, bool success)
+{
+	if (success) {
+		replay_buffer_release_failed_snapshot(stream);
+	} else if (stream->storage_mode == 1) {
+		pthread_mutex_lock(&stream->replay_mutex);
+		/* Preserve one failed snapshot, not an ever-growing history of
+		 * failed attempts. A concurrent stop either clears this reference
+		 * or marks the output inactive before we can retain it. */
+		if (active(stream) && !stream->failed_mux_packets.num) {
+			stream->failed_mux_packets = stream->mux_packets;
+			da_init(stream->mux_packets);
+		}
+		pthread_mutex_unlock(&stream->replay_mutex);
+	}
+	release_mux_packets(&stream->mux_packets);
+}
+
 static void *replay_buffer_mux_thread(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
@@ -1253,14 +1293,11 @@ error:
 		error = true;
 	}
 	stream->pipe = NULL;
-	for (size_t i = 0; i < stream->mux_packets.num; i++) {
-		rb_packet_release(&stream->mux_packets.array[i]);
-	}
-	da_free(stream->mux_packets);
+	replay_buffer_finish_snapshot(stream, !error);
 	replay_disk_end_save(stream->disk_save, !error);
 	stream->disk_save = NULL;
 	if (error) {
-		warn("Replay save failed; disk reclamation remains paused until a successful save or an explicit stop");
+		warn("Replay save failed; retaining at most one failed snapshot while rolling reclamation resumes");
 		replay_buffer_save_failed(stream);
 	}
 	os_atomic_set_bool(&stream->muxing, false);
@@ -1343,10 +1380,7 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	stream->mux_thread_joinable = pthread_create(&stream->mux_thread, NULL, replay_buffer_mux_thread, stream) == 0;
 	if (!stream->mux_thread_joinable) {
 		warn("Failed to create muxer thread");
-		for (size_t i = 0; i < stream->mux_packets.num; i++) {
-			rb_packet_release(&stream->mux_packets.array[i]);
-		}
-		da_free(stream->mux_packets);
+		replay_buffer_finish_snapshot(stream, false);
 		replay_disk_end_save(stream->disk_save, false);
 		stream->disk_save = NULL;
 		replay_buffer_save_failed(stream);

@@ -50,6 +50,7 @@ struct ffmpeg_muxer {
 	obs_hotkey_id hotkey;
 	volatile bool muxing;
 	mux_packets_t mux_packets;
+	mux_packets_t failed_mux_packets;
 
 	/* split file */
 	bool found_video;

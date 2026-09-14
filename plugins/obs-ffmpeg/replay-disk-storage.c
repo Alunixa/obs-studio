@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <winioctl.h>
 #include <io.h>
+#include <fcntl.h>
 #endif
 
 #define REPLAY_DISK_CHUNK_SIZE (16LL * 1024 * 1024)
@@ -42,6 +43,38 @@ struct replay_disk_file {
 #endif
 };
 
+static FILE *open_cache_file(const char *path, bool create)
+{
+#ifdef _WIN32
+	wchar_t *wide = NULL;
+	if (!os_utf8_to_wcs_ptr(path, 0, &wide))
+		return NULL;
+	/* Never inherit this handle into the muxer helper. All readers share
+	 * delete access so the last file reference also survives writer close. */
+	HANDLE handle = CreateFileW(wide, GENERIC_READ | (create ? GENERIC_WRITE | DELETE : 0),
+				    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+				    create ? CREATE_NEW : OPEN_EXISTING,
+				    FILE_ATTRIBUTE_NORMAL | (create ? FILE_FLAG_DELETE_ON_CLOSE : 0), NULL);
+	bfree(wide);
+	if (handle == INVALID_HANDLE_VALUE) {
+		DWORD error = GetLastError();
+		errno = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL ? ENOSPC : EACCES;
+		return NULL;
+	}
+	int fd = _open_osfhandle((intptr_t)handle, _O_BINARY | (create ? _O_RDWR : _O_RDONLY));
+	if (fd == -1) {
+		CloseHandle(handle);
+		return NULL;
+	}
+	FILE *file = _fdopen(fd, create ? "w+b" : "rb");
+	if (!file)
+		_close(fd);
+	return file;
+#else
+	return os_fopen(path, create ? "w+bx" : "rb");
+#endif
+}
+
 static void replay_disk_file_ref(struct replay_disk_file *file)
 {
 	os_atomic_inc_long(&file->refs);
@@ -65,10 +98,11 @@ static void replay_disk_file_release(struct replay_disk_file *file)
 	if (file->reclaim_handle != INVALID_HANDLE_VALUE) {
 		CloseHandle(file->reclaim_handle);
 	}
-#endif
+#else
 	if (file->file_created && os_unlink(file->path.array) != 0) {
 		blog(LOG_WARNING, "[replay buffer] Could not remove temporary cache '%s'", file->path.array);
 	}
+#endif
 	if (file->directory_created) {
 		/* Only our unique session directory, never recursively delete a root. */
 		os_rmdir(file->directory.array);
@@ -146,8 +180,8 @@ static struct replay_disk_chunk *allocate_chunk(struct replay_disk_store *store,
 	pthread_mutex_lock(&file->mutex);
 	struct replay_disk_chunk *chunk = NULL;
 	/* Already-free extents may be written without deleting any protected
-	 * data. Newly expired extents stay deferred until a successful save.
-	 * Reusing pre-save free space bounds repeated saves on non-sparse disks. */
+	 * data. A failed snapshot is pinned by its packets, not by pausing all
+	 * future reclamation. Reuse also bounds non-sparse files. */
 	struct replay_disk_chunk **slot = &file->free_chunks;
 	while (*slot && (*slot)->capacity < capacity) {
 		slot = &(*slot)->next;
@@ -226,7 +260,7 @@ bool replay_disk_open(struct replay_disk_store *store, const char *directory, co
 		return false;
 	}
 	dstr_printf(&backing->path, "%s/cache.tmp", backing->directory.array);
-	FILE *file = os_fopen(backing->path.array, "w+bx");
+	FILE *file = open_cache_file(backing->path.array, true);
 	if (!file) {
 		replay_disk_file_release(backing);
 		return false;
@@ -247,9 +281,16 @@ bool replay_disk_open(struct replay_disk_store *store, const char *directory, co
 		return false;
 	}
 	DWORD returned = 0;
-	if ((!options || !options->disable_sparse) &&
-	    DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &backing->reclaim_handle, 0, FALSE,
-			    DUPLICATE_SAME_ACCESS)) {
+	/* Keep the file alive after the writer closes, including non-sparse
+	 * mode. The last snapshot/reader reference releases this handle. */
+	if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &backing->reclaim_handle, 0, FALSE,
+			     DUPLICATE_SAME_ACCESS)) {
+		fclose(file);
+		replay_disk_file_release(backing);
+		errno = EIO;
+		return false;
+	}
+	if (!options || !options->disable_sparse) {
 		backing->sparse =
 			!!DeviceIoControl(backing->reclaim_handle, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &returned, NULL);
 	}
@@ -299,7 +340,7 @@ struct replay_disk_file *replay_disk_begin_save(struct replay_disk_store *store)
 	file->reclaim_paused = true;
 	pthread_mutex_unlock(&file->mutex);
 	if (!replay_disk_seal(store)) {
-		replay_disk_file_release(file);
+		replay_disk_end_save(file, false);
 		return NULL;
 	}
 	return file;
@@ -310,24 +351,24 @@ void replay_disk_end_save(struct replay_disk_file *file, bool success)
 	if (!file) {
 		return;
 	}
-	if (success) {
+	/* The caller retains references to any failed snapshot it must keep.
+	 * Neither outcome may pin every subsequently expired live packet. */
+	UNUSED_PARAMETER(success);
+	pthread_mutex_lock(&file->mutex);
+	struct replay_disk_chunk *chunks = file->deferred_chunks;
+	file->deferred_chunks = NULL;
+	file->reclaim_paused = false;
+	pthread_mutex_unlock(&file->mutex);
+	/* A save token pins the file even after stop/restart. Return one
+	 * extent at a time without blocking the writer for the whole batch. */
+	while (chunks) {
+		struct replay_disk_chunk *next = chunks->next;
+		reclaim_chunk(chunks);
 		pthread_mutex_lock(&file->mutex);
-		struct replay_disk_chunk *chunks = file->deferred_chunks;
-		file->deferred_chunks = NULL;
-		file->reclaim_paused = false;
+		chunks->next = file->free_chunks;
+		file->free_chunks = chunks;
 		pthread_mutex_unlock(&file->mutex);
-		/* A save token pins the file even after stop/restart. Return one
-		 * extent at a time so ongoing writes need not wait for a large
-		 * post-save reclamation batch under a file-wide lock. */
-		while (chunks) {
-			struct replay_disk_chunk *next = chunks->next;
-			reclaim_chunk(chunks);
-			pthread_mutex_lock(&file->mutex);
-			chunks->next = file->free_chunks;
-			file->free_chunks = chunks;
-			pthread_mutex_unlock(&file->mutex);
-			chunks = next;
-		}
+		chunks = next;
 	}
 	replay_disk_file_release(file);
 }
@@ -405,7 +446,7 @@ bool replay_disk_read(struct replay_disk_reader *reader, struct replay_disk_chun
 	if (reader->chunk != chunk) {
 		if (!reader->chunk || reader->chunk->backing != chunk->backing) {
 			replay_disk_reader_close(reader);
-			reader->file = os_fopen(chunk->backing->path.array, "rb");
+			reader->file = open_cache_file(chunk->backing->path.array, false);
 			if (!reader->file) {
 				return false;
 			}

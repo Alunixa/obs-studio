@@ -13,6 +13,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <fcntl.h>
 #endif
 
 #define CHECK(condition)                                                                 \
@@ -45,9 +46,10 @@ static size_t chunk_count(const char *directory)
 	return count;
 }
 
-static void test_lifetime(const char *directory)
+static void test_lifetime(const char *directory, bool disable_sparse)
 {
 	struct replay_disk_store store = {0};
+	struct replay_disk_options options = {.disable_sparse = disable_sparse};
 	struct replay_disk_reader reader = {0};
 	struct replay_disk_chunk *chunk = NULL;
 	int64_t offset = 0;
@@ -56,7 +58,7 @@ static void test_lifetime(const char *directory)
 	memset(data, 0xa7, sizeof(data));
 
 	CHECK(!replay_disk_open(&store, "", NULL));
-	CHECK(replay_disk_open(&store, directory, NULL));
+	CHECK(replay_disk_open(&store, directory, &options));
 	CHECK(!replay_disk_write(&store, NULL, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(!replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
@@ -70,7 +72,7 @@ static void test_lifetime(const char *directory)
 	replay_disk_chunk_release(chunk);
 	replay_disk_close(&store);
 	CHECK(chunk_count(directory) == 1);
-	CHECK(replay_disk_open(&store, directory, NULL));
+	CHECK(replay_disk_open(&store, directory, &options));
 	CHECK(replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
 	CHECK(memcmp(data, result, sizeof(data)) == 0);
 	replay_disk_chunk_release(chunk);
@@ -131,9 +133,29 @@ static void test_concurrent_save(const char *directory)
 	puts("PASS one cache file; slow save concurrent with 2048 appends and stop");
 }
 
+static FILE *open_shared_test_file(const char *path, bool truncate)
+{
+#ifdef _WIN32
+	wchar_t *wide = NULL;
+	CHECK(os_utf8_to_wcs_ptr(path, 0, &wide) != 0);
+	HANDLE handle = CreateFileW(wide, GENERIC_READ | (truncate ? GENERIC_WRITE : 0),
+				    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+				    truncate ? TRUNCATE_EXISTING : OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	bfree(wide);
+	CHECK(handle != INVALID_HANDLE_VALUE);
+	int fd = _open_osfhandle((intptr_t)handle, _O_BINARY | (truncate ? _O_RDWR : _O_RDONLY));
+	CHECK(fd != -1);
+	FILE *file = _fdopen(fd, truncate ? "w+b" : "rb");
+#else
+	FILE *file = os_fopen(path, truncate ? "w+b" : "rb");
+#endif
+	CHECK(file != NULL);
+	return file;
+}
+
 static uint8_t first_byte(const char *path)
 {
-	FILE *file = os_fopen(path, "rb");
+	FILE *file = open_shared_test_file(path, false);
 	CHECK(file != NULL);
 	int byte = fgetc(file);
 	CHECK(byte != EOF);
@@ -177,22 +199,24 @@ static void test_deferred_reclamation(const char *directory, bool disable_sparse
 	memset(data, 0x42, 65536);
 	CHECK(replay_disk_write(&store, data, 65536, &retained, &retained_offset));
 	CHECK(replay_disk_seal(&store));
-	replay_disk_chunk_release(old);
+	/* The failed snapshot owner keeps this reference until a successful
+	 * retry. Unrelated future expired packets must not be pinned by it. */
 	replay_disk_get_stats(&store, &before);
-	CHECK(before.reclaim_paused && before.deferred_bytes == 65536 && before.reusable_bytes == 0);
+	CHECK(before.reclaim_paused && before.deferred_bytes == 0 && before.reusable_bytes == 0);
 	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
 	CHECK(chunk_count(directory) == 1);
 
 	replay_disk_end_save(save, false);
 	replay_disk_get_stats(&store, &failed);
-	CHECK(failed.reclaim_paused && failed.deferred_bytes == before.deferred_bytes);
+	CHECK(!failed.reclaim_paused && failed.deferred_bytes == 0);
 	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
 	memset(data, 0x43, 65536);
 	CHECK(replay_disk_write(&store, data, 65536, &extra, &extra_offset));
 	CHECK(replay_disk_seal(&store));
 	replay_disk_chunk_release(extra);
 	replay_disk_get_stats(&store, &failed);
-	CHECK(failed.reserved_bytes == 3 * 65536 && failed.deferred_bytes == 2 * 65536);
+	CHECK(failed.reserved_bytes == 3 * 65536 && failed.deferred_bytes == 0);
+	CHECK(failed.reusable_bytes == 65536);
 	CHECK(first_byte(replay_disk_path(&store)) == 0x41);
 #ifdef _WIN32
 	uint64_t allocated_before = allocated_size(&store);
@@ -200,6 +224,7 @@ static void test_deferred_reclamation(const char *directory, bool disable_sparse
 
 	save = replay_disk_begin_save(&store);
 	CHECK(save != NULL);
+	replay_disk_chunk_release(old);
 	replay_disk_end_save(save, true);
 	replay_disk_get_stats(&store, &after);
 	CHECK(!after.reclaim_paused && after.deferred_bytes == 0 && after.reusable_bytes == 2 * 65536);
@@ -233,7 +258,7 @@ static void test_deferred_reclamation(const char *directory, bool disable_sparse
 	bfree(result);
 	bfree(data);
 	CHECK(chunk_count(directory) == 0);
-	puts("PASS failed save defers reclamation; successful retry frees only expired extents; bounded reuse");
+	puts("PASS failed snapshot stays pinned; unrelated extents recycle; successful retry frees expired data");
 }
 
 static void test_space_limits(const char *directory)
@@ -372,7 +397,7 @@ static void test_failures(const char *directory)
 	store.chunk_limit = 1;
 	CHECK(replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(replay_disk_seal(&store)); /* Packet larger than a chunk is valid. */
-	FILE *file = os_fopen(replay_disk_path(&store), "wb");
+	FILE *file = open_shared_test_file(replay_disk_path(&store), true);
 	CHECK(file != NULL);
 	CHECK(fclose(file) == 0); /* Simulate externally truncated/corrupt storage. */
 	CHECK(!replay_disk_read(&reader, chunk, offset, result, sizeof(result)));
@@ -385,7 +410,7 @@ static void test_failures(const char *directory)
 	/* A read-only stream deterministically injects a write failure. */
 	CHECK(replay_disk_open(&store, directory, NULL));
 	CHECK(fclose(store.file) == 0);
-	store.file = os_fopen(replay_disk_path(&store), "rb");
+	store.file = open_shared_test_file(replay_disk_path(&store), false);
 	CHECK(store.file != NULL);
 	CHECK(!replay_disk_write(&store, data, sizeof(data), &chunk, &offset));
 	CHECK(chunk == NULL);
@@ -532,7 +557,8 @@ static int test_main(int argc, char **argv)
 		goto cleanup;
 	}
 #endif
-	test_lifetime(directory.array);
+	test_lifetime(directory.array, false);
+	test_lifetime(directory.array, true);
 	test_concurrent_save(directory.array);
 	test_deferred_reclamation(directory.array, false);
 	test_deferred_reclamation(directory.array, true);
