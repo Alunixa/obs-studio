@@ -286,6 +286,76 @@ static void test_space_limits(const char *directory)
 	puts("PASS non-sparse fallback; 128 saves at fixed file size; budget/free-space failures preserve live data");
 }
 
+static void test_failed_save_retention(const char *directory, bool disable_sparse)
+{
+	struct replay_disk_store store = {0};
+	struct replay_disk_reader reader = {0};
+	struct replay_disk_options options = {.max_bytes = 4 * 65536, .disable_sparse = disable_sparse};
+	struct replay_disk_chunk *snapshot = NULL;
+	int64_t snapshot_offset = 0;
+	uint8_t bytes[65536];
+	uint8_t result[65536];
+	memset(bytes, 0x73, sizeof(bytes));
+	CHECK(replay_disk_open(&store, directory, &options));
+	store.chunk_limit = 65536;
+	CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &snapshot, &snapshot_offset));
+	struct replay_disk_file *save = replay_disk_begin_save(&store);
+	CHECK(save != NULL);
+	/* The caller keeps just the failed snapshot, not all future packets. */
+	replay_disk_end_save(save, false);
+	for (int i = 0; i < 128; i++) {
+		struct replay_disk_chunk *extra = NULL;
+		int64_t offset = 0;
+		save = replay_disk_begin_save(&store);
+		CHECK(save != NULL);
+		memset(bytes, (uint8_t)i, sizeof(bytes));
+		CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &extra, &offset));
+		CHECK(replay_disk_seal(&store));
+		replay_disk_chunk_release(extra);
+		replay_disk_end_save(save, false);
+	}
+	struct replay_disk_stats stats;
+	replay_disk_get_stats(&store, &stats);
+	CHECK(!stats.reclaim_paused && stats.deferred_bytes == 0);
+	CHECK(stats.reserved_bytes <= 2 * 65536);
+	CHECK(replay_disk_read(&reader, snapshot, snapshot_offset, result, sizeof(result)));
+	for (size_t i = 0; i < sizeof(result); i++)
+		CHECK(result[i] == 0x73);
+	replay_disk_reader_close(&reader);
+	replay_disk_chunk_release(snapshot);
+	replay_disk_close(&store);
+	CHECK(chunk_count(directory) == 0);
+	puts("PASS 128 failed saves stay bounded and preserve the original failed snapshot");
+}
+
+#ifdef _WIN32
+static void test_abrupt_exit(const char *executable, const char *directory)
+{
+	os_process_args_t *args = os_process_args_create(executable);
+	os_process_args_add_arg(args, "--abrupt-cache-exit");
+	os_process_args_add_arg(args, directory);
+	os_process_pipe_t *pipe = os_process_pipe_create2(args, "r");
+	os_process_args_destroy(args);
+	CHECK(pipe != NULL);
+	os_process_pipe_set_read_timeout(pipe, 5000);
+	uint8_t bytes[256];
+	while (os_process_pipe_read(pipe, bytes, sizeof(bytes)) != 0) {
+	}
+	CHECK(os_process_pipe_destroy(pipe) == 0);
+	CHECK(chunk_count(directory) == 0);
+	/* Only empty directories belonging to this unique synthetic test. */
+	struct dstr pattern = {0};
+	os_glob_t *files = NULL;
+	dstr_printf(&pattern, "%s/OBS-Replay-Cache/*", directory);
+	CHECK(os_glob(pattern.array, 0, &files) == 0);
+	for (size_t i = 0; files && i < files->gl_pathc; i++)
+		CHECK(os_rmdir(files->gl_pathv[i].path) == 0);
+	os_globfree(files);
+	dstr_free(&pattern);
+	puts("PASS process exit without replay destructors leaves no allocated cache file");
+}
+#endif
+
 static void test_failures(const char *directory)
 {
 	struct replay_disk_store store = {0};
@@ -415,6 +485,17 @@ static void test_pipe_timeout(const char *executable)
 static int test_main(int argc, char **argv)
 {
 #ifdef _WIN32
+	if (argc == 3 && strcmp(argv[1], "--abrupt-cache-exit") == 0) {
+		struct replay_disk_store store = {0};
+		struct replay_disk_chunk *chunk = NULL;
+		int64_t offset = 0;
+		uint8_t bytes[65536] = {0x75};
+		CHECK(replay_disk_open(&store, argv[2], NULL));
+		CHECK(replay_disk_write(&store, bytes, sizeof(bytes), &chunk, &offset));
+		CHECK(replay_disk_seal(&store));
+		CHECK(FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(store.file))));
+		ExitProcess(0); /* Deliberately skip every cache cleanup function. */
+	}
 	if (argc == 2 && strcmp(argv[1], "--exit") == 0) {
 		return 0;
 	}
@@ -431,24 +512,41 @@ static int test_main(int argc, char **argv)
 		return 0;
 	}
 #endif
-	CHECK(argc == 2);
+	bool retention_only = argc == 3 && strcmp(argv[2], "--failed-retention") == 0;
+	bool crash_only = argc == 3 && strcmp(argv[2], "--crash-cleanup") == 0;
+	CHECK(argc == 2 || retention_only || crash_only);
 	long allocations = bnum_allocs();
 	char *uuid = os_generate_uuid();
 	struct dstr directory = {0};
 	dstr_printf(&directory, "%s/replay-tests-中文 (space)-%s", argv[1], uuid);
 	bfree(uuid);
 	CHECK(os_mkdirs(directory.array) == 0);
+	if (retention_only) {
+		test_failed_save_retention(directory.array, false);
+		test_failed_save_retention(directory.array, true);
+		goto cleanup;
+	}
+#ifdef _WIN32
+	if (crash_only) {
+		test_abrupt_exit(argv[0], directory.array);
+		goto cleanup;
+	}
+#endif
 	test_lifetime(directory.array);
 	test_concurrent_save(directory.array);
 	test_deferred_reclamation(directory.array, false);
 	test_deferred_reclamation(directory.array, true);
 	test_space_limits(directory.array);
+	test_failed_save_retention(directory.array, false);
+	test_failed_save_retention(directory.array, true);
 	test_failures(directory.array);
 	test_instances(directory.array);
 	test_frame_layout();
 #ifdef _WIN32
 	test_pipe_timeout(argv[0]);
+	test_abrupt_exit(argv[0], directory.array);
 #endif
+cleanup:;
 	struct dstr cache_root = {0};
 	dstr_printf(&cache_root, "%s/OBS-Replay-Cache", directory.array);
 	CHECK(os_rmdir(cache_root.array) == 0);
