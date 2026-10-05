@@ -13,8 +13,12 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows x64 🪟
+    name: Windows ${{ matrix.target }} 🪟
     runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x64, arm64]
 
     steps:
       - name: Checkout
@@ -47,7 +51,19 @@ jobs:
       - name: Build OBS
         uses: ./.github/actions/build-obs
         with:
-          target: x64
+          target: ${{ matrix.target }}
           config: RelWithDebInfo
           codesign: false
           workingDirectory: ${{ github.workspace }}
+
+      - name: Install unpacked build
+        shell: pwsh
+        run: |
+          cmake --install "build_${{ matrix.target }}" --config RelWithDebInfo --prefix "${{ github.workspace }}/dist/obs-studio-${{ matrix.target }}"
+
+      - name: Upload unpacked build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: obs-studio-windows-${{ matrix.target }}
+          path: dist/obs-studio-${{ matrix.target }}/
+          if-no-files-found: error
