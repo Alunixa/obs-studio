@@ -248,13 +248,14 @@ static bool init_encoder_base(struct nvenc_data *enc, obs_data_t *settings)
 	const struct video_output_info *voi = video_output_get_info(video);
 
 #ifndef NVENC_12_2_OR_LATER
-	if (astrcmpi(enc->props.tune, "uhq") == 0) {
+	if (!lossless && astrcmpi(enc->props.tune, "uhq") == 0) {
 		NV_FAIL("UHQ tuning requires NVENC API 12.2 or later; the driver selected API 12.1.");
 		return false;
 	}
 #endif
 #ifndef NVENC_13_0_OR_LATER
-	if (enc->codec == CODEC_H264 && astrcmpi(enc->props.profile, "high10") == 0) {
+	if (enc->codec == CODEC_H264 && enc->in_format != VIDEO_FORMAT_I444 &&
+	    astrcmpi(enc->props.profile, "high10") == 0) {
 		NV_FAIL("H.264 high10 requires NVENC API 13.0 or later; use a supported profile or update the driver.");
 		return false;
 	}
