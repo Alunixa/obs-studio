@@ -5,7 +5,7 @@ find_package(FFnvcodec 12 REQUIRED)
 add_executable(obs-nvenc-test)
 
 target_sources(obs-nvenc-test PRIVATE obs-nvenc-test-main.cpp)
-target_link_libraries(obs-nvenc-test FFnvcodec::FFnvcodec)
+target_link_libraries(obs-nvenc-test PRIVATE FFnvcodec::FFnvcodec)
 
 foreach(api IN ITEMS 12_1 12_2 13_0)
   add_library(obs-nvenc-probe-${api} OBJECT obs-nvenc-test.cpp)
