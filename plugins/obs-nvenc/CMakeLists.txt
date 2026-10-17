@@ -23,11 +23,11 @@ find_package(FFnvcodec 12 REQUIRED)
 add_library(obs-nvenc MODULE)
 add_library(OBS::nvenc ALIAS obs-nvenc)
 
+include(cmake/backends.cmake)
 add_subdirectory(obs-nvenc-test)
 
-target_sources(
-  obs-nvenc
-  PRIVATE
+set(
+  nvenc_backend_sources
     $<$<PLATFORM_ID:Linux>:nvenc-opengl.c>
     $<$<PLATFORM_ID:Windows>:nvenc-d3d11.c>
     cuda-helpers.c
@@ -40,16 +40,24 @@ target_sources(
     nvenc-opts-parser.c
     nvenc-properties.c
     nvenc.c
-    obs-nvenc.c
-    obs-nvenc.h
 )
 
+foreach(api IN ITEMS 12_1 12_2 13_0)
+  add_library(obs-nvenc-${api} OBJECT ${nvenc_backend_sources})
+  nvenc_isolate_backend(obs-nvenc-${api} ${api})
+  target_link_libraries(
+    obs-nvenc-${api}
+    PRIVATE OBS::libobs OBS::opts-parser FFnvcodec::FFnvcodec $<$<PLATFORM_ID:Linux>:OBS::glad>
+  )
+  target_compile_definitions(obs-nvenc-${api} PRIVATE $<$<BOOL:${ENABLE_NVENC_FFMPEG_IDS}>:REGISTER_FFMPEG_IDS>)
+  target_link_libraries(obs-nvenc PRIVATE obs-nvenc-${api})
+endforeach()
+
+target_sources(obs-nvenc PRIVATE obs-nvenc.c obs-nvenc.h nvenc-api.h nvenc-api-version.h)
 target_link_libraries(
   obs-nvenc
   PRIVATE OBS::libobs OBS::opts-parser FFnvcodec::FFnvcodec $<$<PLATFORM_ID:Linux>:OBS::glad>
 )
-
-target_compile_definitions(obs-nvenc PRIVATE $<$<BOOL:${ENABLE_NVENC_FFMPEG_IDS}>:REGISTER_FFMPEG_IDS>)
 
 if(OS_WINDOWS)
   configure_file(cmake/windows/obs-module.rc.in obs-nvenc.rc)

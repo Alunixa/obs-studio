@@ -224,7 +224,7 @@ static inline bool init_nvenc_internal(obs_encoder_t *encoder)
 		return false;
 	}
 
-	if (NV_FAILED(encoder, nv_create_instance(&nv))) {
+	if (NV_FAILED(encoder, nvenc_api_create_instance(nv_create_instance, ver, &nv))) {
 		return false;
 	}
 
@@ -354,6 +354,12 @@ static bool nvenc_check(void)
 		goto fail;
 	}
 
+	if (config_get_uint(config, "general", "nvenc_api") != NVCODEC_CONFIGURED_VERSION) {
+		blog(LOG_WARNING, "[obs-nvenc] Probe and encoder selected different NVENC APIs; check matching files");
+		success = false;
+		goto fail;
+	}
+
 	num_devices = (int)config_get_int(config, "general", "nvenc_devices");
 	read_codec_caps(config, CODEC_H264, "h264");
 	read_codec_caps(config, CODEC_HEVC, "hevc");
@@ -368,7 +374,7 @@ static bool nvenc_check(void)
 	}
 
 	blog(LOG_INFO,
-	     "[obs-nvenc] NVENC version: %d.%d (compiled) / %s (driver), "
+	     "[obs-nvenc] NVENC version: %d.%d (selected; available: 12.1/12.2/13.0) / %s (driver), "
 	     "CUDA driver version: %s, AV1 supported: %s",
 	     NVCODEC_CONFIGURED_VERSION >> 4, NVCODEC_CONFIGURED_VERSION & 0xf, nvenc_ver, cuda_ver,
 	     codec_supported[CODEC_AV1] ? "true" : "false");

@@ -6,9 +6,7 @@
 #endif
 
 #include <obs-module.h>
-#include <ffnvcodec/nvEncodeAPI.h>
-
-#define NVCODEC_CONFIGURED_VERSION ((NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION)
+#include "nvenc-api.h"
 
 #if NVENCAPI_MAJOR_VERSION > 12 || NVENCAPI_MINOR_VERSION >= 1
 #define NVENC_12_1_OR_LATER
@@ -64,8 +62,6 @@ struct encoder_caps {
 	bool four_four_four;
 	bool four_two_two;
 };
-
-typedef NVENCSTATUS(NVENCAPI *NV_CREATE_INSTANCE_FUNC)(NV_ENCODE_API_FUNCTION_LIST *);
 
 extern NV_ENCODE_API_FUNCTION_LIST nv;
 extern NV_CREATE_INSTANCE_FUNC nv_create_instance;

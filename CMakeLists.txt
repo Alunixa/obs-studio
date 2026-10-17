@@ -32,6 +32,9 @@ add_subdirectory(plugins)
 
 add_subdirectory(test/test-input)
 add_subdirectory(test/replay-buffer)
+if(ENABLE_REPLAY_TESTS AND ENABLE_NVENC)
+  add_subdirectory(test/nvenc-compat)
+endif()
 
 add_subdirectory(frontend)
 

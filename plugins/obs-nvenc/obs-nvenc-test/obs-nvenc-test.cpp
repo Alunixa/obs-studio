@@ -1,11 +1,9 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-#include <chrono>
-#include <future>
 #include <cstring>
 
-#include <ffnvcodec/nvEncodeAPI.h>
+#include "../nvenc-api.h"
 #include <ffnvcodec/dynlink_loader.h>
 
 /*
@@ -14,13 +12,12 @@
  */
 
 using namespace std;
-using namespace std::chrono_literals;
 
+namespace {
 static CudaFunctions *cu = nullptr;
 static NvencFunctions *nvenc = nullptr;
 
-NV_ENCODE_API_FUNCTION_LIST nv = {NV_ENCODE_API_FUNCTION_LIST_VER};
-static constexpr uint32_t NVENC_CONFIGURED_VERSION = (NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION;
+NV_ENCODE_API_FUNCTION_LIST nv = {};
 
 /* NVML stuff */
 #define NVML_SUCCESS 0
@@ -205,11 +202,16 @@ private:
 };
 
 struct CUDACtx {
-	CUcontext ctx;
+	CUcontext ctx = nullptr;
 
 	CUDACtx() = default;
 
-	~CUDACtx() { cu->cuCtxDestroy(ctx); }
+	~CUDACtx()
+	{
+		if (ctx) {
+			cu->cuCtxDestroy(ctx);
+		}
+	}
 
 	bool Init(int adapter_idx)
 	{
@@ -255,17 +257,16 @@ struct NVSession {
 
 	NVSession() = default;
 
-	~NVSession() { nv.nvEncDestroyEncoder(ptr); }
+	~NVSession()
+	{
+		if (ptr) {
+			nv.nvEncDestroyEncoder(ptr);
+		}
+	}
 
 	NVENCSTATUS OpenSession(const CUDACtx &ctx)
 	{
-		NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS params = {};
-		params.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-		params.apiVersion = NVENCAPI_VERSION;
-		params.device = ctx.ctx;
-		params.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
-
-		return nv.nvEncOpenEncodeSessionEx(&params, &ptr);
+		return nvenc_api_open_session(&nv, ctx.ctx, NV_ENC_DEVICE_TYPE_CUDA, &ptr);
 	}
 };
 
@@ -276,12 +277,19 @@ static bool init_nvenc()
 		return false;
 	}
 
-	NVENCSTATUS res = nvenc->NvEncodeAPICreateInstance(&nv);
+	uint32_t driver_version = 0;
+	NVENCSTATUS res = nvenc->NvEncodeAPIGetMaxSupportedVersion(&driver_version);
+	if (res != NV_ENC_SUCCESS) {
+		printf("reason=no_nvenc_version\n");
+		return false;
+	}
+	res = nvenc_api_create_instance(nvenc->NvEncodeAPICreateInstance, driver_version, &nv);
 	if (res != NV_ENC_SUCCESS) {
 		printf("reason=nvenc_init_%d\n", res);
 		return false;
 	}
 
+	printf("nvenc_api=%u\n", NVCODEC_CONFIGURED_VERSION);
 	return true;
 }
 
@@ -381,9 +389,8 @@ static bool get_adapter_caps(int adapter_idx, codec_caps_map &caps, device_info 
 
 #if NVENCAPI_MAJOR_VERSION > 12 || NVENCAPI_MINOR_VERSION >= 2
 		/* Explicitly check if UHQ tuning is supported since temporal filtering query is true for all codecs. */
-		NV_ENC_PRESET_CONFIG preset_config = {};
-		preset_config.version = NV_ENC_PRESET_CONFIG_VER;
-		preset_config.presetCfg.version = NV_ENC_CONFIG_VER;
+		NV_ENC_PRESET_CONFIG preset_config;
+		nvenc_api_preset_config(&preset_config);
 
 		NVENCSTATUS res = nv.nvEncGetEncodePresetConfigEx(nvSession.ptr, *guid, NV_ENC_PRESET_P7_GUID,
 								  NV_ENC_TUNING_INFO_ULTRA_HIGH_QUALITY,
@@ -467,7 +474,7 @@ bool nvenc_checks(codec_caps_map &caps, vector<device_info> &device_infos)
 		return false;
 	}
 
-	if (nvenc_ver < NVENC_CONFIGURED_VERSION) {
+	if (nvenc_ver < NVCODEC_CONFIGURED_VERSION) {
 		printf("reason=outdated_driver\n");
 		return false;
 	}
@@ -563,14 +570,9 @@ int check_thread()
 	return ret;
 }
 
-int main(int, char **)
+} // namespace
+
+extern "C" int nvenc_probe_run(void)
 {
-	future<int> f = async(launch::async, check_thread);
-	future_status status = f.wait_for(2.5s);
-
-	if (status == future_status::timeout) {
-		exit(1);
-	}
-
-	return f.get();
+	return check_thread();
 }

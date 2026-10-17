@@ -1,4 +1,5 @@
 #include "nvenc-internal.h"
+#include "nvenc-api-version.h"
 
 #include <obs-nal.h>
 #include <util/darray.h>
@@ -128,22 +129,22 @@ static bool nvenc_update(void *data, obs_data_t *settings)
 
 static bool init_session(struct nvenc_data *enc)
 {
-	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS params = {NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER};
-	params.apiVersion = NVENCAPI_VERSION;
+	void *device;
+	NV_ENC_DEVICE_TYPE device_type;
 #ifdef _WIN32
 	if (enc->non_texture) {
-		params.device = enc->cu_ctx;
-		params.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+		device = enc->cu_ctx;
+		device_type = NV_ENC_DEVICE_TYPE_CUDA;
 	} else {
-		params.device = enc->device;
-		params.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
+		device = enc->device;
+		device_type = NV_ENC_DEVICE_TYPE_DIRECTX;
 	}
 #else
-	params.device = enc->cu_ctx;
-	params.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+	device = enc->cu_ctx;
+	device_type = NV_ENC_DEVICE_TYPE_CUDA;
 #endif
 
-	if (NV_FAILED(nv.nvEncOpenEncodeSessionEx(&params, &enc->session))) {
+	if (NV_FAILED(nvenc_api_open_session(&nv, device, device_type, &enc->session))) {
 		return false;
 	}
 	return true;
@@ -246,6 +247,23 @@ static bool init_encoder_base(struct nvenc_data *enc, obs_data_t *settings)
 	video_t *video = obs_encoder_video(enc->encoder);
 	const struct video_output_info *voi = video_output_get_info(video);
 
+#ifndef NVENC_12_2_OR_LATER
+	if (astrcmpi(enc->props.tune, "uhq") == 0) {
+		NV_FAIL("UHQ tuning requires NVENC API 12.2 or later; the driver selected API 12.1.");
+		return false;
+	}
+#endif
+#ifndef NVENC_13_0_OR_LATER
+	if (enc->codec == CODEC_H264 && astrcmpi(enc->props.profile, "high10") == 0) {
+		NV_FAIL("H.264 high10 requires NVENC API 13.0 or later; use a supported profile or update the driver.");
+		return false;
+	}
+#endif
+	if (!nvenc_api_supports_split_mode(NVCODEC_CONFIGURED_VERSION, enc->props.split_encode)) {
+		NV_FAIL("The selected split-encoding mode requires NVENC API 13.0 or later.");
+		return false;
+	}
+
 	enc->cx = obs_encoder_get_width(enc->encoder);
 	enc->cy = obs_encoder_get_height(enc->encoder);
 
@@ -267,9 +285,8 @@ static bool init_encoder_base(struct nvenc_data *enc, obs_data_t *settings)
 	/* -------------------------- */
 	/* get preset default config  */
 
-	NV_ENC_PRESET_CONFIG preset_config = {0};
-	preset_config.version = NV_ENC_PRESET_CONFIG_VER;
-	preset_config.presetCfg.version = NV_ENC_CONFIG_VER;
+	NV_ENC_PRESET_CONFIG preset_config;
+	nvenc_api_preset_config(&preset_config);
 
 	err = nv.nvEncGetEncodePresetConfigEx(enc->session, enc->codec_guid, nv_preset, nv_tuning, &preset_config);
 	if (nv_failed(enc->encoder, err, __FUNCTION__, "nvEncGetEncodePresetConfig")) {
@@ -624,6 +641,7 @@ static bool init_encoder_hevc(struct nvenc_data *enc, obs_data_t *settings)
 	}
 
 #ifndef NVENC_12_2_OR_LATER
+	UNUSED_PARAMETER(profile_is_10bpc);
 	hevc_config->pixelBitDepthMinus8 = is_10_bit(enc) ? 2 : 0;
 #else
 	hevc_config->inputBitDepth = is_10_bit(enc) ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;

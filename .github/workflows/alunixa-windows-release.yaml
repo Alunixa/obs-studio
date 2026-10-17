@@ -1,11 +1,12 @@
 name: Alunixa Windows Build and Release
-run-name: OBS replay cache cleanup ${{ github.sha }}
+run-name: OBS NVENC API auto compatibility ${{ github.sha }}
 
 on:
   push:
     branches:
       - codex/obs-replay-stability-20260910
       - codex/obs-replay-integrity-20260915
+      - codex/nvenc-api-compat-20261017
   workflow_dispatch:
 
 permissions:
@@ -47,8 +48,8 @@ jobs:
             $Skip = $LASTEXITCODE -eq 0
           } else {
             $Ref = $env:GITHUB_SHA
-            $Tag = "alunixa-20260915-$($Ref.Substring(0,9))"
-            $Version = '32.2.2-alunixa.20260915.1'
+            $Tag = "alunixa-20261017-$($Ref.Substring(0,9))"
+            $Version = '32.2.2-alunixa.20261017.1'
             $Skip = $false
           }
           "ref=$Ref" >> $env:GITHUB_OUTPUT
@@ -90,6 +91,10 @@ jobs:
         if: steps.source.outputs.skip != 'true' && matrix.variant == 'fixed'
         working-directory: source
         run: |
+          $ErrorActionPreference = 'Stop'
+          & ./build_x64/rundir/Release/bin/64bit/test-nvenc-api.exe 2>&1 |
+            Tee-Object -FilePath nvenc-api-tests.txt
+          if ($LASTEXITCODE) { throw 'NVENC multi-version ABI regression tests failed' }
           & ./build_x64/rundir/Release/bin/64bit/test-replay-storage.exe $env:RUNNER_TEMP |
             Tee-Object -FilePath regression-tests.txt
           if ($LASTEXITCODE) { throw 'Replay regression tests failed' }
@@ -124,7 +129,7 @@ jobs:
           VARIANT: ${{ matrix.variant }}
         run: |
           $Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $Title = "Alunixa OBS - 回放缓存回收修复 - 2026-09-15 - Windows x64"
+          $Title = "Alunixa OBS - NVENC API 12.1/12.2/13.0 自动兼容 - 2026-10-17 - Windows x64"
           if ($env:VARIANT -eq 'archive') {
             $Title = "Alunixa OBS - 2026-09-10 - archive"
             $Notes = @"
@@ -137,20 +142,22 @@ jobs:
           The full matching Windows runtime was rebuilt by GitHub Actions.
           "@
           } else {
-            $Notes = Get-Content -LiteralPath ../tooling/docs/alunixa-replay-cache-20260915.md -Raw
+            $Notes = Get-Content -LiteralPath ../tooling/docs/alunixa-nvenc-api-20261017.md -Raw
           }
           $Notes += "`n`n## Build evidence`n- Source: $env:SOURCE_REF`n- GitHub Actions: $Run`n"
           $Notes += "- Critical DLL dependency loading: PASS`n"
           if ($env:VARIANT -eq 'fixed') {
+            $Notes += "- NVENC API 12.1/12.2/13.0 native ABI, automatic selection, session initialization and error propagation mock regressions: PASS`n"
+            $Notes += "- All three real encoder backends and probe backends compiled and linked in this Windows package.`n"
             $Notes += "- Bounded failed-save retention, sparse/non-sparse lifecycle, abrupt process-exit cleanup, muxer I/O errors, frame layout and probe timeout regressions: PASS`n"
-            $Notes += "- VLC visual corruption/color shift: unresolved; no visual-fix claim in this release.`n"
+            $Notes += "- Physical GPUs with legacy 12.1/12.2 drivers: not exercised by the hosted runner.`n"
           }
           $Notes += "`n``````text`n$(Get-Content build_x64/SHA256SUMS.txt -Raw)```````n"
           $Notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
           $Assets = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File |
             Select-Object -ExpandProperty FullName)
           $Assets += @('build_x64/SHA256SUMS.txt', 'runtime-validation.txt')
-          if ($env:VARIANT -eq 'fixed') { $Assets += 'regression-tests.txt' }
+          if ($env:VARIANT -eq 'fixed') { $Assets += @('regression-tests.txt', 'nvenc-api-tests.txt') }
           gh release create $env:RELEASE_TAG @Assets --repo $env:GITHUB_REPOSITORY `
             --target $env:SOURCE_REF --title $Title --notes-file release-notes.md --prerelease --latest=false
           if ($LASTEXITCODE) { throw 'Release publication failed' }
@@ -164,4 +171,5 @@ jobs:
             source/build_x64/CMakeFiles/CMakeConfigureLog.yaml
             source/regression-tests.txt
             source/runtime-validation.txt
+            source/nvenc-api-tests.txt
           retention-days: 7
