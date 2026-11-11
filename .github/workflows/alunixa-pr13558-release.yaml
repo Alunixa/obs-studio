@@ -39,8 +39,8 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: dedd294c7bca501d3c2421248c35831af49dc9b9
-          path: runtime-tools
+          ref: ${{ github.sha }}
+          path: tooling
           persist-credentials: false
 
       - name: Verify exact source and conflict resolution
@@ -110,7 +110,7 @@ jobs:
         working-directory: source
         run: |
           $ErrorActionPreference = 'Stop'
-          & ../runtime-tools/test/replay-buffer/Verify-Runtime.ps1 -Root ./build_x64/install |
+          & ../tooling/.github/scripts/Verify-PR13558-Runtime.ps1 -Root ./build_x64/install |
             Tee-Object -FilePath runtime-validation.txt
           Push-Location build_x64
           try {
