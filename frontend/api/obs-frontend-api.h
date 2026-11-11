@@ -65,6 +65,8 @@ enum obs_frontend_event {
 
 	OBS_FRONTEND_EVENT_CANVAS_ADDED,
 	OBS_FRONTEND_EVENT_CANVAS_REMOVED,
+
+	OBS_FRONTEND_EVENT_REPLAY_BUFFER_SAVING,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -78,8 +80,9 @@ struct obs_frontend_source_list {
 static inline void obs_frontend_source_list_free(struct obs_frontend_source_list *source_list)
 {
 	size_t num = source_list->sources.num;
-	for (size_t i = 0; i < num; i++)
+	for (size_t i = 0; i < num; i++) {
 		obs_source_release(source_list->sources.array[i]);
+	}
 	da_free(source_list->sources);
 }
 
@@ -90,8 +93,9 @@ struct obs_frontend_canvas_list {
 static inline void obs_frontend_canvas_list_free(struct obs_frontend_canvas_list *canvas_list)
 {
 	size_t num = canvas_list->canvases.num;
-	for (size_t i = 0; i < num; i++)
+	for (size_t i = 0; i < num; i++) {
 		obs_canvas_release(canvas_list->canvases.array[i]);
+	}
 
 	da_free(canvas_list->canvases);
 }
@@ -257,6 +261,8 @@ EXPORT bool obs_frontend_remove_canvas(obs_canvas_t *canvas);
 EXPORT void obs_frontend_copy_sceneitem(obs_sceneitem_t *item);
 EXPORT bool obs_frontend_can_paste_sceneitem(bool duplicate);
 EXPORT void obs_frontend_paste_sceneitem(obs_scene_t *scene, bool duplicate);
+
+EXPORT bool obs_frontend_is_safe_mode_enabled(void);
 
 /* ------------------------------------------------------------------------- */
 

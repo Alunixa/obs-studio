@@ -209,9 +209,9 @@ API_AVAILABLE(macos(12.5)) static bool init_screen_stream(struct screen_capture 
     } else {
         blog(LOG_WARNING, "Unable to retrieve OBS output FPS when initializing macOS Screen Capture");
     }
-    FourCharCode l10r_type = 0;
-    l10r_type = ('l' << 24) | ('1' << 16) | ('0' << 8) | 'r';
-    [sc->stream_properties setPixelFormat:l10r_type];
+
+    OSType pixelFormat = sck_get_preferred_pixel_format();
+    [sc->stream_properties setPixelFormat:pixelFormat];
 
     if (@available(macOS 13.0, *)) {
         [sc->stream_properties setCapturesAudio:YES];

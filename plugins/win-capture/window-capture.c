@@ -121,17 +121,19 @@ static const char *wgc_whole_match_classes[] = {
 	"Windows.UI.Core.CoreWindow",
 	"WinUIDesktopWin32WindowClass",
 	"GAMINGSERVICESUI_HOSTING_WINDOW_CLASS",
-	"XLMAIN",            /* Microsoft Excel */
-	"PPTFrameClass",     /* Microsoft PowerPoint */
-	"screenClass",       /* Microsoft PowerPoint (Slide Show) */
-	"PodiumParent",      /* Microsoft PowerPoint (Presenter View) */
-	"OpusApp",           /* Microsoft Word */
-	"OMain",             /* Microsoft Access */
-	"Framework::CFrame", /* Microsoft OneNote */
-	"rctrl_renwnd32",    /* Microsoft Outlook */
-	"MSWinPub",          /* Microsoft Publisher */
-	"OfficeApp-Frame",   /* Microsoft 365 Software */
+	"XLMAIN",                 /* Microsoft Excel */
+	"PPTFrameClass",          /* Microsoft PowerPoint */
+	"screenClass",            /* Microsoft PowerPoint (Slide Show) */
+	"PodiumParent",           /* Microsoft PowerPoint (Presenter View) */
+	"OpusApp",                /* Microsoft Word */
+	"OMain",                  /* Microsoft Access */
+	"Framework::CFrame",      /* Microsoft OneNote */
+	"rctrl_renwnd32",         /* Microsoft Outlook */
+	"MSWinPub",               /* Microsoft Publisher */
+	"OfficeApp-Frame",        /* Microsoft 365 Software */
+	"WindowsWebview2Wrapper", /* Construct 3 Games */
 	"SDL_app",
+	"WINDOWSCLIENT", /* Roblox */
 	NULL,
 };
 
@@ -152,7 +154,7 @@ static enum window_capture_method choose_method(enum window_capture_method metho
 		if (astrstri(current_class, *class) != NULL) {
 			return METHOD_WGC;
 		}
-		class ++;
+		class++;
 	}
 
 	class = wgc_whole_match_classes;
@@ -160,7 +162,7 @@ static enum window_capture_method choose_method(enum window_capture_method metho
 		if (astrcmpi(current_class, *class) == 0) {
 			return METHOD_WGC;
 		}
-		class ++;
+		class++;
 	}
 
 	return METHOD_BITBLT;
@@ -297,6 +299,7 @@ static bool load_winrt_imports(struct winrt_exports *exports, void *module, cons
 }
 
 extern bool graphics_uses_d3d11;
+static void wc_update(void *data, obs_data_t *settings);
 
 static void *wc_create(obs_data_t *settings, obs_source_t *source)
 {
@@ -341,8 +344,7 @@ static void *wc_create(obs_data_t *settings, obs_source_t *source)
 
 	signal_handler_connect(sh, "rename", rename_audio_source, &wc->audio_source);
 
-	update_settings(wc, settings);
-	log_settings(wc, settings);
+	wc_update(wc, settings);
 	return wc;
 }
 
@@ -535,9 +537,9 @@ static obs_properties_t *wc_properties(void *data)
 
 	p = obs_properties_add_list(ppts, "method", TEXT_METHOD, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(p, TEXT_METHOD_AUTO, METHOD_AUTO);
-	obs_property_list_add_int(p, TEXT_METHOD_BITBLT, METHOD_BITBLT);
 	obs_property_list_add_int(p, TEXT_METHOD_WGC, METHOD_WGC);
-	obs_property_list_item_disable(p, 2, !wgc_supported);
+	obs_property_list_add_int(p, TEXT_METHOD_BITBLT, METHOD_BITBLT);
+	obs_property_list_item_disable(p, 1, !wgc_supported);
 	obs_property_set_modified_callback(p, wc_capture_method_changed);
 
 	p = obs_properties_add_list(ppts, "priority", TEXT_MATCH_PRIORITY, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);

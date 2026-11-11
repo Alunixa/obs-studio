@@ -135,6 +135,8 @@ struct obs_module {
 	DARRAY(char *) outputs;
 	DARRAY(char *) encoders;
 	DARRAY(char *) services;
+
+	enum obs_runtime_module_type module_type;
 };
 
 struct obs_disabled_module {
@@ -156,6 +158,7 @@ extern void free_module(struct obs_module *mod);
 struct obs_module_path {
 	char *bin;
 	char *data;
+	enum obs_runtime_module_type type;
 };
 
 static inline void free_module_path(struct obs_module_path *omp)
@@ -461,6 +464,7 @@ struct obs_core_audio {
 	struct deque tasks;
 
 	struct obs_source *monitoring_duplicating_source;
+	struct monitoring_mix_data *monitoring_mix;
 };
 
 /* user sources, output channels, and displays */
@@ -537,6 +541,8 @@ struct obs_core_hotkeys {
 	char *push_to_talk;
 	char *sceneitem_show;
 	char *sceneitem_hide;
+	char *monitor_on;
+	char *monitor_off;
 };
 
 typedef DARRAY(struct obs_source_info) obs_source_info_array_t;
@@ -548,7 +554,6 @@ struct obs_core {
 	DARRAY(struct obs_module_path) module_paths;
 	DARRAY(char *) safe_modules;
 	DARRAY(char *) disabled_modules;
-	DARRAY(char *) core_modules;
 
 	obs_source_info_array_t source_types;
 	obs_source_info_array_t input_types;
@@ -576,6 +581,8 @@ struct obs_core {
 	os_task_queue_t *destruction_task_thread;
 
 	obs_task_handler_t ui_task_handler;
+
+	bool core_modules_loaded;
 };
 
 extern struct obs_core *obs;
@@ -991,6 +998,9 @@ struct obs_source {
 	/* audio monitoring */
 	struct audio_monitor *monitor;
 	enum obs_monitoring_type monitoring_type;
+	bool monitoring_enabled;
+	obs_hotkey_pair_id monitor_on_off_key;
+	struct monitoring_mix_source *monitoring_mix_source;
 
 	/* media action queue */
 	DARRAY(struct media_action) media_actions;
@@ -1021,6 +1031,8 @@ extern void audio_monitor_destroy(struct audio_monitor *monitor);
 
 extern obs_source_t *obs_source_create_canvas(obs_canvas_t *canvas, const char *id, const char *name,
 					      obs_data_t *settings, obs_data_t *hotkey_data);
+extern obs_source_t *obs_source_create_private_with_canvas(obs_canvas_t *canvas, const char *id, const char *name,
+							   obs_data_t *settings);
 extern obs_source_t *obs_source_create_set_last_ver(obs_canvas_t *canvas, const char *id, const char *name,
 						    const char *uuid, obs_data_t *settings, obs_data_t *hotkey_data,
 						    uint32_t last_obs_ver, bool is_private);

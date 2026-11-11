@@ -204,6 +204,12 @@ Reference Counting Functions
 
 ---------------------
 
+.. function:: bool obs_weak_canvas_references_canvas(obs_weak_canvas_t *weak, obs_canvas_t *canvas)
+
+   Whether the weak canvas reference ties back to the specified canvas
+
+---------------------
+
 Canvas Channel Functions
 ------------------------
 
@@ -298,5 +304,11 @@ Canvas Video Functions
 .. function:: void obs_canvas_render(obs_canvas_t *canvas)
 
    Render the canvas's view. Must be called on the graphics thread.
+
+---------------------
+
+.. function:: bool obs_canvas_video_active(obs_canvas_t *canvas)
+
+   Returns true if video of the canvas is active, false otherwise.
 
 ---------------------

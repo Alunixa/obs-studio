@@ -1,7 +1,7 @@
 {
     "id": "com.obsproject.Studio",
     "runtime": "org.freedesktop.Platform",
-    "runtime-version": "25.08",
+    "runtime-version": "26.08",
     "sdk": "org.freedesktop.Sdk",
     "command": "obs",
     "finish-args": [
@@ -22,15 +22,16 @@
     "add-extensions": {
         "com.obsproject.Studio.Plugin": {
             "directory": "plugins",
+            "versions": "stable;test",
             "subdirectories": true,
             "add-ld-path": "lib",
-            "merge-dirs": "lib/obs-plugins;share/obs/obs-plugins",
+            "merge-dirs": "lib/obs-modules/plugins;share/obs/obs-modules/plugins;lib/obs-plugins;share/obs/obs-plugins",
             "no-autodownload": true,
             "autodelete": true
         },
         "org.freedesktop.LinuxAudio.Plugins": {
             "directory": "extensions/Plugins",
-            "version": "25.08",
+            "version": "26.08",
             "add-ld-path": "lib",
             "merge-dirs": "vst",
             "subdirectories": true,
@@ -48,8 +49,8 @@
                 {
                     "type": "file",
                     "dest-filename": "base.tar.xz",
-                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-06-06/flatpak-base-x86_64-2026-06-06.tar.xz",
-                    "sha256": "e0888f1852cf942babf640dd8379842861a46a608f2130833d619899ddf25b04"
+                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-09-24/flatpak-base-x86_64-2026-09-24.tar.xz",
+                    "sha256": "480a98e55b51566603b6ea0ee28dbeddaefc1e172d18fb72f16ab9d941794c79"
                 }
             ]
         },
@@ -63,8 +64,8 @@
                 {
                     "type": "file",
                     "dest-filename": "devel.tar.xz",
-                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-06-06/flatpak-devel-x86_64-2026-06-06.tar.xz",
-                    "sha256": "51f9cb6563fc0870a2696ca977c1826f48f2ede6ebaf3486bc4017090fea0d93"
+                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-09-24/flatpak-devel-x86_64-2026-09-24.tar.xz",
+                    "sha256": "c15e10e46054150d927bd81880dfbcc71641658395b84cdaad3f572920481f4a"
                 }
             ]
         },
@@ -81,8 +82,8 @@
                 {
                     "type": "file",
                     "dest-filename": "devtools.tar.xz",
-                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-06-06/flatpak-devtools-x86_64-2026-06-06.tar.xz",
-                    "sha256": "0ba4e5078e63a008a504150ccc1c25bdbed1e5490765606a67af07b0c93c05c2"
+                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-09-24/flatpak-devtools-x86_64-2026-09-24.tar.xz",
+                    "sha256": "f5ba4578cade6bfd3670340e7eeb0f31876b39e29bc978b5ed47da7de03ffc70"
                 }
             ]
         },
@@ -96,8 +97,8 @@
                 {
                     "type": "file",
                     "dest-filename": "qt.tar.xz",
-                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-06-06/flatpak-qt-x86_64-2026-06-06.tar.xz",
-                    "sha256": "2dc37eddc2f252304383c0c2b5d85898593b695e026ebb88892bdc005498ddb6"
+                    "url": "https://github.com/obsproject/obs-deps-buildstream/releases/download/2026-09-24/flatpak-qt-x86_64-2026-09-24.tar.xz",
+                    "sha256": "7a4060cab48798e13be0eb9aa967dd3cb6f94209c6594eacccf3223c5c91e3de"
                 }
             ]
         },
@@ -120,8 +121,8 @@
             "sources": [
                 {
                     "type": "archive",
-                    "url": "https://cdn-fastly.obsproject.com/downloads/cef_binary_6533_linux_x86_64_v6.tar.xz",
-                    "sha256": "7963335519a19ccdc5233f7334c5ab023026e2f3e9a0cc417007c09d86608146"
+                    "url": "https://cdn-fastly.obsproject.com/downloads/cef_binary_7871_linux_x86_64.tar.xz",
+                    "sha256": "8ffc64d06ea74da613eeda7f2aa5d4e98661af6fa3ed8c68724c9a6e4e89ea8e"
                 }
             ]
         },
@@ -131,6 +132,8 @@
             "builddir": true,
             "config-opts": [
                 "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                "-DCMAKE_INCLUDE_PATH=/app/include;/usr/include",
+                "-DENABLE_FLATPAK=ON",
                 "-DENABLE_WAYLAND=ON",
                 "-DENABLE_BROWSER=ON",
                 "-DCEF_ROOT_DIR=/app/cef",
@@ -141,7 +144,8 @@
                 "-DENABLE_AJA=ON",
                 "-DENABLE_LIBFDK=ON",
                 "-DENABLE_QSV11=ON",
-                "-DENABLE_DECKLINK=OFF"
+                "-DENABLE_DECKLINK=OFF",
+                "-DENABLE_VST3=OFF"
             ],
             "secret-opts": [
                 "-DRESTREAM_CLIENTID=$RESTREAM_CLIENTID",

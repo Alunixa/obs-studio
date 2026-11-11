@@ -917,31 +917,21 @@ static const char *replay_buffer_getname(void *type)
 	return obs_module_text("ReplayBuffer");
 }
 
-static void replay_buffer_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+static void save_replay_proc(void *data, calldata_t *cd)
 {
-	UNUSED_PARAMETER(id);
-	UNUSED_PARAMETER(hotkey);
 
-	if (!pressed)
-		return;
-
+	UNUSED_PARAMETER(cd);
 	struct ffmpeg_muxer *stream = data;
 
 	if (os_atomic_load_bool(&stream->active)) {
 		obs_encoder_t *vencoder = obs_output_get_video_encoder(stream->output);
 		if (obs_encoder_paused(vencoder)) {
-			info("Could not save buffer because encoders paused");
+			info("Could not save buffer because the encoder is paused");
 			return;
 		}
 
 		stream->save_ts = os_gettime_ns() / 1000LL;
 	}
-}
-
-static void save_replay_proc(void *data, calldata_t *cd)
-{
-	replay_buffer_hotkey(data, 0, NULL, true);
-	UNUSED_PARAMETER(cd);
 }
 
 static void get_last_replay(void *data, calldata_t *cd)
@@ -957,15 +947,13 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
 
-	stream->hotkey = obs_hotkey_register_output(output, "ReplayBuffer.Save", obs_module_text("ReplayBuffer.Save"),
-						    replay_buffer_hotkey, stream);
-
 	proc_handler_t *ph = obs_output_get_proc_handler(output);
 	proc_handler_add(ph, "void save()", save_replay_proc, stream);
 	proc_handler_add(ph, "void get_last_replay(out string path)", get_last_replay, stream);
 
 	signal_handler_t *sh = obs_output_get_signal_handler(output);
 	signal_handler_add(sh, "void saved()");
+	signal_handler_add(sh, "void saving(ptr output)");
 
 	return stream;
 }
@@ -973,8 +961,6 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 static void replay_buffer_destroy(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
-	if (stream->hotkey)
-		obs_hotkey_unregister(stream->hotkey);
 	if (stream->disk_tmp_file) {
 		fclose(stream->disk_tmp_file);
 		stream->disk_tmp_file = NULL;
@@ -997,7 +983,7 @@ static bool replay_buffer_start(void *data)
 	stream->max_time = obs_data_get_int(s, "max_time_sec") * 1000000LL;
 	stream->max_size = obs_data_get_int(s, "max_size_mb") * (1024 * 1024);
 	stream->storage_mode = (int)obs_data_get_int(s, "storage_mode");
-	
+
 	if (stream->storage_mode == 1) {
 		const char *dir = obs_data_get_string(s, "directory");
 		dstr_copy(&stream->disk_tmp_path, dir);
@@ -1005,7 +991,8 @@ static bool replay_buffer_start(void *data)
 		if (stream->disk_tmp_path.array && stream->disk_tmp_path.array[stream->disk_tmp_path.len - 1] == '\\') {
 			slash = '\\';
 		}
-		if (stream->disk_tmp_path.array && stream->disk_tmp_path.array[stream->disk_tmp_path.len - 1] != slash) {
+		if (stream->disk_tmp_path.array &&
+		    stream->disk_tmp_path.array[stream->disk_tmp_path.len - 1] != slash) {
 			dstr_cat_ch(&stream->disk_tmp_path, slash);
 		}
 		dstr_cat(&stream->disk_tmp_path, "replay_buffer_disk.tmp");
@@ -1123,12 +1110,13 @@ static void *replay_buffer_mux_thread(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
 	bool error = false;
-	
+
 	FILE *disk_read_file = NULL;
 	if (stream->storage_mode == 1 && stream->disk_tmp_path.array) {
 		disk_read_file = os_fopen(stream->disk_tmp_path.array, "rb");
 		if (!disk_read_file) {
-			warn("Failed to open temporary disk replay buffer file for reading '%s'", stream->disk_tmp_path.array);
+			warn("Failed to open temporary disk replay buffer file for reading '%s'",
+			     stream->disk_tmp_path.array);
 		}
 	}
 
@@ -1149,7 +1137,7 @@ static void *replay_buffer_mux_thread(void *data)
 	for (size_t i = 0; i < stream->mux_packets.num; i++) {
 		struct rb_packet *rb = &stream->mux_packets.array[i];
 		struct encoder_packet *pkt = &rb->pkt;
-		
+
 		// Load from disk if needed
 		if (stream->storage_mode == 1 && rb->disk_offset >= 0 && disk_read_file) {
 			long *p_refs = bmalloc(pkt->size + sizeof(long));
@@ -1233,6 +1221,12 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 			      audio_dts_offsets);
 	}
 
+	calldata_t cd = {0};
+	calldata_set_ptr(&cd, "output", stream->output);
+	signal_handler_t *sh = obs_output_get_signal_handler(stream->output);
+	signal_handler_signal(sh, "saving", &cd);
+	calldata_free(&cd);
+
 	generate_filename(stream, &stream->path, true);
 
 	os_atomic_set_bool(&stream->muxing, true);
@@ -1286,14 +1280,15 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	}
 
 	obs_encoder_packet_ref(&pkt, packet);
-	
+
 	struct rb_packet rb_pkt;
 	rb_pkt.pkt = pkt;
 	rb_pkt.disk_offset = -1;
 
 	if (stream->storage_mode == 1 && stream->disk_tmp_file && pkt.data && pkt.size > 0) {
 		// Calculate wrap-around if needed
-		int64_t disk_size_limit = stream->max_size > 0 ? stream->max_size : (int64_t)8LL * 1024 * 1024 * 1024; // 8GB default limit
+		int64_t disk_size_limit = stream->max_size > 0 ? stream->max_size
+							       : (int64_t)8LL * 1024 * 1024 * 1024; // 8GB default limit
 		if (stream->disk_write_pos + (int64_t)pkt.size > disk_size_limit) {
 			stream->disk_write_pos = 0; // Wrap around
 			os_fseeki64(stream->disk_tmp_file, 0, SEEK_SET);
@@ -1314,7 +1309,7 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 		rb_pkt.disk_offset = stream->disk_write_pos;
 		fwrite(pkt.data, 1, pkt.size, stream->disk_tmp_file);
 		stream->disk_write_pos += pkt.size;
-		
+
 		// Free actual data from RAM but keep the structure
 		long *p_refs = ((long *)pkt.data) - 1;
 		if (os_atomic_dec_long(p_refs) == 0)
