@@ -1,0 +1,173 @@
+name: PR 13558 Conflict Resolution Build
+run-name: Build PR 13558 conflict resolution 7c500db5d
+
+on:
+  push:
+    branches:
+      - codex/pr-13558-build-20261111
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr13558-conflicts-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 7c500db5d94c995eb1c02a6050193d56d8c5d8a2
+  BASE_SHA: fe1ed7955f300efd17fc59f65938388e43d8bb06
+  BUILD_VERSION: 33.0.1-pr13558.20261111
+  RELEASE_TAG: pr13558-conflicts-20261111-7c500db5d
+
+jobs:
+  windows:
+    name: Exact PR source - Windows x64
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: dedd294c7bca501d3c2421248c35831af49dc9b9
+          path: runtime-tools
+          persist-credentials: false
+
+      - name: Verify exact source and conflict resolution
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          git merge-base --is-ancestor $env:BASE_SHA HEAD
+          if ($LASTEXITCODE) { throw 'Current upstream base is not included' }
+          $Expected = @(
+            'frontend/forms/OBSBasicSettings.ui',
+            'frontend/settings/OBSBasicSettings.cpp',
+            'frontend/utility/AdvancedOutput.cpp',
+            'plugins/obs-ffmpeg/obs-ffmpeg-mux.c',
+            'plugins/obs-ffmpeg/obs-ffmpeg-mux.h'
+          )
+          $Actual = @(git diff --name-only "$($env:BASE_SHA)...HEAD")
+          if ($LASTEXITCODE -or @(Compare-Object $Expected $Actual).Count) { throw 'Unexpected PR change scope' }
+          git diff --check "$($env:BASE_SHA)...HEAD"
+          if ($LASTEXITCODE) { throw 'PR whitespace validation failed' }
+          $Notes = @(git ls-tree -r --name-only HEAD -- XJ.md YHYQ.md)
+          if ($LASTEXITCODE -or $Notes.Count) { throw 'Local notes must not enter the source package' }
+          [xml]$Ui = Get-Content -LiteralPath frontend/forms/OBSBasicSettings.ui -Raw
+          foreach ($Name in @('advRBStorageModeLabel', 'advRBStorageMode', 'advRBMegsMax')) {
+            if ($Ui.SelectNodes("//widget[@name='$Name']").Count -ne 1) { throw "UI control missing: $Name" }
+          }
+          $Mux = Get-Content -LiteralPath plugins/obs-ffmpeg/obs-ffmpeg-mux.c -Raw
+          if ($Mux -match '(?m)^(<<<<<<<|=======|>>>>>>>)' -or $Mux.Contains('stream->hotkey')) {
+            throw 'Conflict marker or obsolete backend hotkey access'
+          }
+          $Destroy = [regex]::Match($Mux, '(?s)static void replay_buffer_destroy\(void \*data\)\s*\{(.*?)\n\}').Groups[1].Value
+          foreach ($Required in @(
+            'fclose(stream->disk_tmp_file)',
+            'stream->disk_tmp_file = NULL',
+            'os_unlink(stream->disk_tmp_path.array)',
+            'dstr_free(&stream->disk_tmp_path)',
+            'ffmpeg_mux_destroy(data)'
+          )) {
+            if (-not $Destroy.Contains($Required)) { throw "Missing disk cleanup: $Required" }
+          }
+          @(
+            "PASS exact source $env:SOURCE_SHA",
+            "PASS latest merged upstream base $env:BASE_SHA",
+            'PASS only the five original PR files differ from upstream',
+            'PASS UI XML and disk storage controls',
+            'PASS disk cleanup retained; obsolete backend hotkey access removed',
+            'PASS no conflict markers or local project notes'
+          ) | Set-Content -LiteralPath source-validation.txt -Encoding utf8
+          Get-Content -LiteralPath source-validation.txt
+          # This build-only numeric tag gives the parent and x86 helper
+          # configurations the same version without editing upstream CMake.
+          git -c tag.gpgsign=false tag $env:BUILD_VERSION $env:SOURCE_SHA
+          if ($LASTEXITCODE) { throw 'Build-only version tag failed' }
+
+      - name: Build and install exact merged source
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --preset windows-ci-x64 "-DOBS_VERSION_OVERRIDE=$env:BUILD_VERSION"
+          if ($LASTEXITCODE) { throw 'CMake configure failed' }
+          cmake --build build_x64 --config Release --parallel
+          if ($LASTEXITCODE) { throw 'Full Windows build failed' }
+          cmake --install build_x64 --config Release --prefix build_x64/install
+          if ($LASTEXITCODE) { throw 'Runtime install failed' }
+
+      - name: Verify runtime dependencies and package
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ../runtime-tools/test/replay-buffer/Verify-Runtime.ps1 -Root ./build_x64/install |
+            Tee-Object -FilePath runtime-validation.txt
+          Push-Location build_x64
+          try {
+            cpack -C Release
+            if ($LASTEXITCODE) { throw 'CPack failed' }
+          } finally {
+            Pop-Location
+          }
+          $Zip = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File)
+          if ($Zip.Count -ne 1) { throw 'Expected one complete Windows ZIP' }
+          $Hash = (Get-FileHash -LiteralPath $Zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$Hash  $($Zip[0].Name)" | Set-Content -LiteralPath build_x64/SHA256SUMS.txt -Encoding utf8
+
+      - name: Publish isolated PR verification package
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $Notes = @"
+          # OBS PR #13558 conflict resolution verification
+
+          - Merged upstream master $env:BASE_SHA into the original disk replay feature.
+          - Retained frontend-owned replay hotkeys and disk temporary-file cleanup.
+          - Formatted the existing PR changes; only the original five files differ from upstream.
+          - No unrelated NVENC, replay-cache redesign, personal configuration, or local notes are included.
+          - This workflow exists only on a separate fork build branch, not in the upstream PR.
+
+          ## Verification
+          - Exact source: $env:SOURCE_SHA
+          - Full Windows x64 Release build and runtime dependency validation: PASS
+          - Conflict resolution, five-file scope and UI XML checks: PASS
+          - GitHub Actions: $Run
+          - This is a conflict-only PR test package, not the previously released customized build.
+          - Full gameplay, disk replay concurrency and legacy-driver recording are not tested by this build.
+          - Requires the Microsoft Visual C++ x64 v14 runtime.
+
+          ## ZIP SHA-256
+          $(Get-Content -LiteralPath build_x64/SHA256SUMS.txt -Raw)
+          "@
+          $Notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
+          $Assets = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File |
+            Select-Object -ExpandProperty FullName)
+          $Assets += @('build_x64/SHA256SUMS.txt', 'source-validation.txt', 'runtime-validation.txt')
+          gh release create $env:RELEASE_TAG @Assets --repo $env:GITHUB_REPOSITORY `
+            --target $env:SOURCE_SHA --title 'OBS PR #13558 - Conflict resolution - Windows x64 - 2026-11-11' `
+            --notes-file release-notes.md --prerelease --latest=false
+          if ($LASTEXITCODE) { throw 'PR verification release failed' }
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr13558-conflicts-diagnostics
+          path: |
+            source/build_x64/CMakeFiles/CMakeConfigureLog.yaml
+            source/source-validation.txt
+            source/runtime-validation.txt
+          retention-days: 7
