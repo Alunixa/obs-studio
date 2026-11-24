@@ -1,0 +1,194 @@
+name: PR 13558 Maintenance Verification
+run-name: Verify PR 13558 source bc370001e
+
+on:
+  push:
+    branches:
+      - codex/pr-13558-build-20261124
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pr13558-maintenance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: bc370001e00cc3bec2254a88ee154be8313fbf08
+  BASE_SHA: 0c790bd0151fb9f574867e025ecf57e6eedc58e2
+  BUILD_VERSION: 33.0.3-pr13558.20261124
+  RELEASE_TAG: pr13558-maintenance-20261124-bc370001e
+
+jobs:
+  windows:
+    name: Exact PR source - Windows x64
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          path: tooling
+          persist-credentials: false
+
+      - name: Verify exact source and PR scope
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          git merge-base --is-ancestor $env:BASE_SHA HEAD
+          if ($LASTEXITCODE) { throw 'Expected upstream base is not included' }
+          $Expected = @(
+            'frontend/data/locale/en-US.ini',
+            'frontend/forms/OBSBasicSettings.ui',
+            'frontend/settings/OBSBasicSettings.cpp',
+            'frontend/utility/AdvancedOutput.cpp',
+            'plugins/obs-ffmpeg/obs-ffmpeg-mux.c',
+            'plugins/obs-ffmpeg/obs-ffmpeg-mux.h'
+          )
+          $Actual = @(git diff --name-only "$($env:BASE_SHA)...HEAD")
+          if ($LASTEXITCODE -or @(Compare-Object $Expected $Actual).Count) { throw 'Unexpected PR change scope' }
+          git diff --check "$($env:BASE_SHA)...HEAD"
+          if ($LASTEXITCODE) { throw 'PR whitespace validation failed' }
+          $Notes = @(git ls-tree -r --name-only HEAD -- XJ.md YHYQ.md)
+          if ($LASTEXITCODE -or $Notes.Count) { throw 'Local notes must not enter the source package' }
+          [xml]$Ui = Get-Content -LiteralPath frontend/forms/OBSBasicSettings.ui -Raw
+          foreach ($Name in @('advRBStorageModeLabel', 'advRBStorageMode', 'advRBMegsMax')) {
+            if ($Ui.SelectNodes("//widget[@name='$Name']").Count -ne 1) { throw "UI control missing: $Name" }
+          }
+          $Locale = Get-Content -LiteralPath frontend/data/locale/en-US.ini -Raw
+          foreach ($Key in @(
+            'Basic.Settings.Output.ReplayBuffer.StorageMode',
+            'Basic.Settings.Output.ReplayBuffer.StorageMode.RAM',
+            'Basic.Settings.Output.ReplayBuffer.StorageMode.Disk'
+          )) {
+            if ($Locale -notmatch ('(?m)^' + [regex]::Escape($Key) + '=')) { throw "Missing source locale: $Key" }
+          }
+          $Mux = Get-Content -LiteralPath plugins/obs-ffmpeg/obs-ffmpeg-mux.c -Raw
+          if ($Mux -match '(?m)^(<<<<<<<|=======|>>>>>>>)' -or $Mux.Contains('stream->hotkey')) {
+            throw 'Conflict marker or obsolete backend hotkey access'
+          }
+          @(
+            "PASS exact PR source $env:SOURCE_SHA",
+            "PASS upstream base $env:BASE_SHA",
+            'PASS six related files only; no local notes or CI changes in the PR',
+            'PASS UI XML, storage controls and default locale keys',
+            'PASS no conflict markers or obsolete backend hotkey access',
+            'SCOPE build and dependency verification; disk runtime correctness is not certified'
+          ) | Set-Content -LiteralPath source-validation.txt -Encoding utf8
+          Get-Content -LiteralPath source-validation.txt
+          git -c tag.gpgsign=false tag $env:BUILD_VERSION $env:SOURCE_SHA
+          if ($LASTEXITCODE) { throw 'Build-only version tag failed' }
+
+      - name: Install matching MSVC 14.44 ATL component
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $VsPath = (& $VsWhere -latest -property installationPath).Trim()
+          if (-not $VsPath) { throw 'Visual Studio installation not found' }
+          $Installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $Arguments = "modify --installPath `"$VsPath`" --add Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL --quiet --norestart --nocache"
+          $Process = Start-Process -FilePath $Installer -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
+          if ($Process.ExitCode -notin @(0, 3010)) { throw "ATL install failed: $($Process.ExitCode)" }
+          if (-not (Test-Path -Path "$VsPath\VC\Tools\MSVC\14.44*\atlmfc\include\atlbase.h")) {
+            throw 'Matching ATL header not found'
+          }
+
+      - name: Build and install exact PR source
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --preset windows-ci-x64 "-DOBS_VERSION_OVERRIDE=$env:BUILD_VERSION"
+          if ($LASTEXITCODE) { throw 'CMake configure failed' }
+          cmake --build build_x64 --config Release --parallel -- /nodeReuse:false
+          if ($LASTEXITCODE) { throw 'Full Windows build failed' }
+          cmake --install build_x64 --config Release --prefix build_x64/install
+          if ($LASTEXITCODE) { throw 'Runtime install failed' }
+
+      - name: Verify runtime dependencies and package
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ../tooling/.github/scripts/Verify-PR13558-Runtime.ps1 -Root ./build_x64/install |
+            Tee-Object -FilePath runtime-validation.txt
+          Push-Location build_x64
+          try {
+            cpack -C Release
+            if ($LASTEXITCODE) { throw 'CPack failed' }
+          } finally {
+            Pop-Location
+          }
+          $Zip = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File)
+          if ($Zip.Count -ne 1) { throw 'Expected one complete Windows ZIP' }
+          $Hash = (Get-FileHash -LiteralPath $Zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$Hash  $($Zip[0].Name)" | Set-Content -LiteralPath build_x64/SHA256SUMS.txt -Encoding utf8
+
+      - name: Publish isolated PR verification package
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Run = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $Notes = @"
+          # OBS PR #13558 maintenance verification
+
+          Changes:
+          - Rebased the disk replay feature onto upstream master $env:BASE_SHA.
+          - Preserved frontend-owned hotkeys and the existing disk cleanup paths.
+          - Added default English locale keys for the storage selector and a direct stdio include.
+          - Limited the PR diff to six related source/UI/locale files.
+          - Kept this build workflow and runtime checker on an independent fork branch.
+
+          Verification:
+          - Exact PR source: $env:SOURCE_SHA
+          - Full Windows x64 Release build, CMake configuration and dependency loading: PASS
+          - GitHub Actions: $Run
+          - Upstream PR checks are tracked separately; this release does not certify their status.
+
+          Existing disk replay limitations identified during review:
+          - Ring writes can overwrite data still needed by a pending save.
+          - Incomplete disk reads/writes and buffered tail data are not handled reliably.
+          - Stop/destruction cleanup can race with the asynchronous save thread.
+          - Bitrate modes use an 8 GiB fallback ring size despite the larger UI limit.
+          - Disk creation failure falls back to RAM without applying a separate RAM budget.
+          These pre-existing behaviors were not redesigned by this synchronization update.
+
+          This is a PR build verification package, not the customized NVENC/replay-cache release.
+          Gameplay, disk-save concurrency and legacy-driver recording were not tested.
+          Requires the Microsoft Visual C++ x64 v14 runtime.
+
+          ZIP SHA-256:
+          $(Get-Content -LiteralPath build_x64/SHA256SUMS.txt -Raw)
+          "@
+          $Notes | Set-Content -LiteralPath release-notes.md -Encoding utf8
+          $Assets = @(Get-ChildItem -LiteralPath build_x64 -Filter '*windows-x64.zip' -File |
+            Select-Object -ExpandProperty FullName)
+          $Assets += @('build_x64/SHA256SUMS.txt', 'source-validation.txt', 'runtime-validation.txt')
+          gh release create $env:RELEASE_TAG @Assets --repo $env:GITHUB_REPOSITORY `
+            --target $env:SOURCE_SHA --title 'OBS PR #13558 - Maintenance verification - Windows x64 - 2026-11-24' `
+            --notes-file release-notes.md --prerelease --latest=false
+          if ($LASTEXITCODE) { throw 'PR verification release failed' }
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr13558-maintenance-diagnostics
+          path: |
+            source/build_x64/CMakeFiles/CMakeConfigureLog.yaml
+            source/source-validation.txt
+            source/runtime-validation.txt
+          retention-days: 7
